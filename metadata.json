@@ -1,0 +1,6 @@
+{
+  "name": "SentinelOps",
+  "description": "Offline-first Business Operations Management System for security installation services with CRM, quotation builder, invoicing, and project tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="50%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="100%" stop-color="#f59e0b" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bg)" />
+  <path d="M256 64 L416 128 V272 C416 364 348 436 256 464 C164 436 96 364 96 272 V128 Z" fill="url(#shieldGrad)" />
+  <path d="M256 96 L384 148 V264 C384 340 328 400 256 424 C184 400 128 340 128 264 V148 Z" fill="#0f172a" opacity="0.4" />
+  <!-- Electric pulse & Gate / Security symbol -->
+  <path d="M272 160 L196 280 H252 L236 368 L320 244 H260 Z" fill="url(#accent)" />
+  <!-- Sentinel dots / perimeter grid -->
+  <circle cx="256" cy="120" r="10" fill="#60a5fa" />
+  <circle cx="160" cy="200" r="8" fill="#60a5fa" opacity="0.8" />
+  <circle cx="352" cy="200" r="8" fill="#60a5fa" opacity="0.8" />
+  <circle cx="160" cy="300" r="8" fill="#60a5fa" opacity="0.8" />
+  <circle cx="352" cy="300" r="8" fill="#60a5fa" opacity="0.8" />
+</svg>

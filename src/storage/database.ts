@@ -1,0 +1,185 @@
+/**
+ * SentinelOps - IndexedDB Database Initialization & Migration Layer
+ * Built on the lightweight 'idb' promise wrapper.
+ */
+
+import { openDB, IDBPDatabase } from 'idb';
+import { AppSettings, NumberSequence } from '../types';
+
+export const DB_NAME = 'sentinelops_db';
+export const DB_VERSION = 1;
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  id: 'current_settings',
+  businessName: 'Sentinel Security & Automation Solutions',
+  tradingName: 'SentinelOps PH',
+  tagline: 'Perimeter Security, Electric Fence & Automated Gate Systems',
+  tinNumber: '123-456-789-000',
+  contactNumber: '+63 917 555 8921',
+  email: 'operations@sentinelops.local',
+  website: 'https://sentinelops.local',
+  address: 'Unit 402, Security Tower, C-5 Road, Brgy. Ugong',
+  city: 'Pasig City',
+  region: 'Metro Manila',
+  postalCode: '1604',
+  currency: 'PHP',
+  currencySymbol: '₱',
+  taxMode: 'EXCLUSIVE',
+  taxRatePercent: 12,
+  defaultQuotationValidityDays: 30,
+  defaultPaymentTerms: '50% Mobilization Downpayment upon approval, 40% Progress billing upon delivery and installation of materials, 10% Final retention upon turnover and testing.',
+  defaultWarrantyTerms: 'One (1) year full manufacturer warranty on energizers and gate automation motors. Six (6) months on workmanship and installation wiring.',
+  defaultQuotationNotes: 'Site power supply (220V AC outlet) to energizer/motor controller location to be provided by client. Civil works not specified in the scope are excluded.',
+  quotationPrefix: 'Q-',
+  invoicePrefix: 'INV-',
+  paymentPrefix: 'PAY-',
+  projectPrefix: 'PRJ-',
+  autoLockMinutes: 15,
+  theme: 'dark',
+  updatedAt: new Date().toISOString(),
+};
+
+export async function getDatabase(): Promise<IDBPDatabase> {
+  return openDB(DB_NAME, DB_VERSION, {
+    upgrade(db, oldVersion, newVersion, transaction) {
+      // Version 1: Initial schema
+      if (oldVersion < 1) {
+        // Users Store
+        if (!db.objectStoreNames.contains('users')) {
+          const userStore = db.createObjectStore('users', { keyPath: 'id' });
+          userStore.createIndex('username', 'username', { unique: true });
+        }
+
+        // Settings Store
+        if (!db.objectStoreNames.contains('settings')) {
+          db.createObjectStore('settings', { keyPath: 'id' });
+        }
+
+        // Number Sequences
+        if (!db.objectStoreNames.contains('numberSequences')) {
+          db.createObjectStore('numberSequences', { keyPath: 'prefix' });
+        }
+
+        // Clients Store
+        if (!db.objectStoreNames.contains('clients')) {
+          const clientStore = db.createObjectStore('clients', { keyPath: 'id' });
+          clientStore.createIndex('name', 'name', { unique: false });
+          clientStore.createIndex('leadStatus', 'leadStatus', { unique: false });
+          clientStore.createIndex('leadSource', 'leadSource', { unique: false });
+          clientStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+
+        // Quotations Store
+        if (!db.objectStoreNames.contains('quotations')) {
+          const quotationStore = db.createObjectStore('quotations', { keyPath: 'id' });
+          quotationStore.createIndex('quotationNumber', 'quotationNumber', { unique: true });
+          quotationStore.createIndex('clientId', 'clientId', { unique: false });
+          quotationStore.createIndex('status', 'status', { unique: false });
+          quotationStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+
+        // Quotation Revisions
+        if (!db.objectStoreNames.contains('quotationRevisions')) {
+          const revStore = db.createObjectStore('quotationRevisions', { keyPath: 'id' });
+          revStore.createIndex('quotationId', 'quotationId', { unique: false });
+        }
+
+        // Invoices Store
+        if (!db.objectStoreNames.contains('invoices')) {
+          const invStore = db.createObjectStore('invoices', { keyPath: 'id' });
+          invStore.createIndex('invoiceNumber', 'invoiceNumber', { unique: true });
+          invStore.createIndex('clientId', 'clientId', { unique: false });
+          invStore.createIndex('quotationId', 'quotationId', { unique: false });
+          invStore.createIndex('projectId', 'projectId', { unique: false });
+          invStore.createIndex('status', 'status', { unique: false });
+          invStore.createIndex('dueDate', 'dueDate', { unique: false });
+          invStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+
+        // Payments Store
+        if (!db.objectStoreNames.contains('payments')) {
+          const payStore = db.createObjectStore('payments', { keyPath: 'id' });
+          payStore.createIndex('paymentNumber', 'paymentNumber', { unique: true });
+          payStore.createIndex('invoiceId', 'invoiceId', { unique: false });
+          payStore.createIndex('clientId', 'clientId', { unique: false });
+          payStore.createIndex('paymentDate', 'paymentDate', { unique: false });
+        }
+
+        // Projects Store
+        if (!db.objectStoreNames.contains('projects')) {
+          const prjStore = db.createObjectStore('projects', { keyPath: 'id' });
+          prjStore.createIndex('projectNumber', 'projectNumber', { unique: true });
+          prjStore.createIndex('clientId', 'clientId', { unique: false });
+          prjStore.createIndex('status', 'status', { unique: false });
+          prjStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+        }
+
+        // Attachments Metadata & Blobs Store
+        if (!db.objectStoreNames.contains('attachments')) {
+          const attStore = db.createObjectStore('attachments', { keyPath: 'id' });
+          attStore.createIndex('entityType', 'entityType', { unique: false });
+          attStore.createIndex('entityId', 'entityId', { unique: false });
+        }
+
+        // Audit Events Store
+        if (!db.objectStoreNames.contains('auditEvents')) {
+          const auditStore = db.createObjectStore('auditEvents', { keyPath: 'id' });
+          auditStore.createIndex('timestamp', 'timestamp', { unique: false });
+          auditStore.createIndex('action', 'action', { unique: false });
+          auditStore.createIndex('entityType', 'entityType', { unique: false });
+          auditStore.createIndex('entityId', 'entityId', { unique: false });
+        }
+      }
+    },
+  });
+}
+
+/**
+ * Atomic number allocation for documents within a database transaction.
+ * Generates collision-free IDs like Q-2026-001, INV-2026-001, etc.
+ */
+export async function getNextDocumentNumber(prefixKey: string): Promise<string> {
+  const currentYear = new Date().getFullYear();
+  const sequencePrefix = `${prefixKey}${currentYear}-`;
+
+  const db = await getDatabase();
+  const tx = db.transaction('numberSequences', 'readwrite');
+  const store = tx.objectStore('numberSequences');
+
+  const existing = (await store.get(sequencePrefix)) as NumberSequence | undefined;
+  const nextSeq = existing ? existing.lastNumber + 1 : 1;
+
+  await store.put({
+    prefix: sequencePrefix,
+    lastNumber: nextSeq,
+  });
+
+  await tx.done;
+
+  return `${sequencePrefix}${nextSeq.toString().padStart(3, '0')}`;
+}
+
+/**
+ * Wipe all data (for testing or user-requested hard reset)
+ */
+export async function clearAllDatabaseData(): Promise<void> {
+  const db = await getDatabase();
+  const stores = [
+    'users',
+    'settings',
+    'numberSequences',
+    'clients',
+    'quotations',
+    'quotationRevisions',
+    'invoices',
+    'payments',
+    'projects',
+    'attachments',
+    'auditEvents',
+  ];
+  const tx = db.transaction(stores, 'readwrite');
+  for (const storeName of stores) {
+    await tx.objectStore(storeName).clear();
+  }
+  await tx.done;
+}
