@@ -5,6 +5,7 @@ import { SetupScreen } from '../features/auth/SetupScreen';
 import { LoginScreen } from '../features/auth/LoginScreen';
 import { LockScreen } from '../features/auth/LockScreen';
 import { AppLayout, NavigationTab } from '../components/layout/AppLayout';
+import { PWAStatus } from '../components/ui/PWAStatus';
 
 import { DashboardView } from '../features/dashboard/DashboardView';
 import { ClientsView } from '../features/clients/ClientsView';
@@ -137,10 +138,13 @@ const MainAppContent: React.FC = () => {
 
 export default function App() {
   return (
-    <ToastProvider>
-      <AuthProvider>
-        <MainAppContent />
-      </AuthProvider>
-    </ToastProvider>
+    <>
+      <PWAStatus />
+      <ToastProvider>
+        <AuthProvider>
+          <MainAppContent />
+        </AuthProvider>
+      </ToastProvider>
+    </>
   );
 }

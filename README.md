@@ -107,6 +107,21 @@ npm test
 ```
 Runs the Vitest test suite validating monetary precision, tax calculations, overdue evaluation, and security functions.
 
+### PWA Verification
+
+PWA installation and service-worker registration require HTTPS in production. `localhost` and loopback origins are also supported for development; opening `index.html` with a `file://` URL is not supported.
+
+To verify the production PWA locally:
+
+```bash
+npm run build
+npm run preview
+```
+
+Open the preview URL in Chrome or Edge, wait for the `Offline startup is ready` message, then use DevTools to confirm that the manifest, service worker, and three PNG icons load successfully. Reload once, enable network throttling or offline mode, and reload again to verify the application shell and local IndexedDB records remain available. Reconnect before testing an update; updates are offered through the `Load update` action so an active form is not silently reloaded.
+
+The service worker precaches generated application assets, the manifest, and local icons only. It does not cache credentials, session responses, business records, or IndexedDB data. The first visit must be online so those resources can be cached.
+
 ---
 
 ## 4. Android Tablet Installation Guide

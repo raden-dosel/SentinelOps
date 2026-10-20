@@ -10,36 +10,44 @@ export default defineConfig(() => {
       react(),
       tailwindcss(),
       VitePWA({
-        registerType: 'autoUpdate',
-        includeAssets: ['icon.svg'],
+        registerType: 'prompt',
+        includeAssets: ['icons/*.png'],
         manifest: {
-          id: '/',
-          name: 'SentinelOps — Security Installation Operations',
+          id: './',
+          name: 'SentinelOps — Business Operations Management System',
           short_name: 'SentinelOps',
-          description: 'Offline-first Business Operations Management System for security installation services',
+          description: 'Offline-first business operations management for security installation services.',
           theme_color: '#0f172a',
           background_color: '#0f172a',
           display: 'standalone',
           orientation: 'any',
-          start_url: '/',
-          scope: '/',
+          start_url: './',
+          scope: './',
           icons: [
             {
-              src: '/icon.svg',
-              sizes: '192x192 512x512',
-              type: 'image/svg+xml',
+              src: 'icons/icon-192.png',
+              sizes: '192x192',
+              type: 'image/png',
               purpose: 'any'
             },
             {
-              src: '/icon.svg',
+              src: 'icons/icon-512.png',
               sizes: '512x512',
-              type: 'image/svg+xml',
+              type: 'image/png',
+              purpose: 'any'
+            },
+            {
+              src: 'icons/icon-maskable-512.png',
+              sizes: '512x512',
+              type: 'image/png',
               purpose: 'maskable'
             }
           ]
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          cleanupOutdatedCaches: true,
+          navigateFallback: 'index.html',
         },
         devOptions: {
           enabled: true,
