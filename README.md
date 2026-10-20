@@ -107,6 +107,23 @@ npm test
 ```
 Runs the Vitest test suite validating monetary precision, tax calculations, overdue evaluation, and security functions.
 
+### Phase 2 API development
+
+The API is an additive, authenticated sync slice; the existing IndexedDB application remains usable without it.
+
+```bash
+docker compose -f server/docker-compose.yml up -d postgres
+dotnet ef database update --project server/SentinelOps.Api --startup-project server/SentinelOps.Api
+dotnet run --project server/SentinelOps.Api
+```
+
+Configure `ConnectionStrings__SentinelOps`, `Sync__RegistrationToken`, and explicit
+`Cors__AllowedOrigins` values outside development. Register a device through
+`POST /api/v1/devices/register` using the registration token, then use the returned
+device token as a bearer token for `/api/v1/sync/push` and `/api/v1/sync/changes`.
+The device token is only returned at registration time and is stored server-side as
+a SHA-256 hash. Do not use the development token in a deployed environment.
+
 ### PWA Verification
 
 PWA installation and service-worker registration require HTTPS in production. `localhost` and loopback origins are also supported for development; opening `index.html` with a `file://` URL is not supported.

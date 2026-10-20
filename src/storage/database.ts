@@ -7,7 +7,25 @@ import { openDB, IDBPDatabase } from 'idb';
 import { AppSettings, NumberSequence } from '../types';
 
 export const DB_NAME = 'sentinelops_db';
-export const DB_VERSION = 1;
+export const DB_VERSION = 2;
+
+export interface SyncOutboxRecord {
+  operationId: string;
+  entityType: string;
+  entityId: string;
+  operation: 'upsert' | 'delete';
+  baseRevision: string | null;
+  payload: unknown;
+  createdAt: string;
+  attempts: number;
+  lastError?: string;
+}
+
+export interface SyncMetadata {
+  id: 'cursor';
+  cursor: string | null;
+  lastSuccessfulSyncAt?: string;
+}
 
 export const DEFAULT_SETTINGS: AppSettings = {
   id: 'current_settings',
@@ -48,6 +66,20 @@ export async function getDatabase(): Promise<IDBPDatabase> {
         if (!db.objectStoreNames.contains('users')) {
           const userStore = db.createObjectStore('users', { keyPath: 'id' });
           userStore.createIndex('username', 'username', { unique: true });
+        }
+        if (oldVersion < 2) {
+          if (!db.objectStoreNames.contains('syncOutbox')) {
+            const outbox = db.createObjectStore('syncOutbox', { keyPath: 'operationId' });
+            outbox.createIndex('createdAt', 'createdAt', { unique: false });
+            outbox.createIndex('entityId', 'entityId', { unique: false });
+          }
+          if (!db.objectStoreNames.contains('syncMetadata')) {
+            db.createObjectStore('syncMetadata', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('syncConflicts')) {
+            const conflicts = db.createObjectStore('syncConflicts', { keyPath: 'operationId' });
+            conflicts.createIndex('entityId', 'entityId', { unique: false });
+          }
         }
 
         // Settings Store
@@ -176,6 +208,9 @@ export async function clearAllDatabaseData(): Promise<void> {
     'projects',
     'attachments',
     'auditEvents',
+    'syncOutbox',
+    'syncMetadata',
+    'syncConflicts',
   ];
   const tx = db.transaction(stores, 'readwrite');
   for (const storeName of stores) {

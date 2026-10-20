@@ -1,0 +1,49 @@
+name: SentinelOps CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - run: bun test --run
+      - run: bun run build
+
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: sentinelops
+          POSTGRES_USER: sentinelops
+          POSTGRES_PASSWORD: development-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentinelops -d sentinelops"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet restore server/SentinelOps.Api/SentinelOps.Api.csproj
+      - run: dotnet tool install --global dotnet-ef --version 10.0.1
+      - run: dotnet build server/SentinelOps.Api/SentinelOps.Api.csproj --no-restore
+      - run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj
+      - run: dotnet ef database update --project server/SentinelOps.Api/SentinelOps.Api.csproj --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
+        env:
+          ConnectionStrings__SentinelOps: Host=localhost;Port=5432;Database=sentinelops;Username=sentinelops;Password=development-only
