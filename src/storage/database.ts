@@ -19,12 +19,43 @@ export interface SyncOutboxRecord {
   createdAt: string;
   attempts: number;
   lastError?: string;
+  status?: 'pending' | 'syncing' | 'failed' | 'conflict';
 }
 
 export interface SyncMetadata {
   id: 'cursor';
   cursor: string | null;
   lastSuccessfulSyncAt?: string;
+  lastSyncAttemptAt?: string;
+  resyncRequired?: boolean;
+}
+
+export interface SyncConfig {
+  id: 'current_config';
+  apiBaseUrl: string;
+  deviceId: string;
+  deviceToken: string;
+  businessId: string;
+  businessName: string;
+  deviceName: string;
+  autoSync: boolean;
+  syncIntervalMinutes: number;
+  enrolledAt: string;
+  lastSyncStatus: 'Not configured' | 'Idle' | 'Syncing' | 'Synced' | 'Error' | 'Conflict' | 'ResyncRequired';
+  lastSyncMessage?: string;
+}
+
+export interface SyncConflictRecord {
+  operationId: string;
+  entityType: string;
+  entityId: string;
+  operation: 'upsert' | 'delete';
+  localPayload: unknown;
+  serverRevision?: string;
+  serverPayload?: unknown;
+  message?: string;
+  occurredAt: string;
+  resolved: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -57,111 +88,122 @@ export const DEFAULT_SETTINGS: AppSettings = {
   updatedAt: new Date().toISOString(),
 };
 
+/**
+ * Versioned schema upgrader supporting upgrades from any previous version
+ */
+export function upgradeDatabaseSchema(
+  db: IDBPDatabase,
+  oldVersion: number,
+  newVersion: number | null
+): void {
+  // Version 1: Core domain stores (Phase 1 MVP)
+  if (oldVersion < 1 && (newVersion === null || newVersion >= 1)) {
+    if (!db.objectStoreNames.contains('users')) {
+      const userStore = db.createObjectStore('users', { keyPath: 'id' });
+      userStore.createIndex('username', 'username', { unique: true });
+    }
+
+    if (!db.objectStoreNames.contains('settings')) {
+      db.createObjectStore('settings', { keyPath: 'id' });
+    }
+
+    if (!db.objectStoreNames.contains('numberSequences')) {
+      db.createObjectStore('numberSequences', { keyPath: 'prefix' });
+    }
+
+    if (!db.objectStoreNames.contains('clients')) {
+      const clientStore = db.createObjectStore('clients', { keyPath: 'id' });
+      clientStore.createIndex('name', 'name', { unique: false });
+      clientStore.createIndex('leadStatus', 'leadStatus', { unique: false });
+      clientStore.createIndex('leadSource', 'leadSource', { unique: false });
+      clientStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('quotations')) {
+      const quotationStore = db.createObjectStore('quotations', { keyPath: 'id' });
+      quotationStore.createIndex('quotationNumber', 'quotationNumber', { unique: true });
+      quotationStore.createIndex('clientId', 'clientId', { unique: false });
+      quotationStore.createIndex('status', 'status', { unique: false });
+      quotationStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('quotationRevisions')) {
+      const revStore = db.createObjectStore('quotationRevisions', { keyPath: 'id' });
+      revStore.createIndex('quotationId', 'quotationId', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('invoices')) {
+      const invStore = db.createObjectStore('invoices', { keyPath: 'id' });
+      invStore.createIndex('invoiceNumber', 'invoiceNumber', { unique: true });
+      invStore.createIndex('clientId', 'clientId', { unique: false });
+      invStore.createIndex('quotationId', 'quotationId', { unique: false });
+      invStore.createIndex('projectId', 'projectId', { unique: false });
+      invStore.createIndex('status', 'status', { unique: false });
+      invStore.createIndex('dueDate', 'dueDate', { unique: false });
+      invStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('payments')) {
+      const payStore = db.createObjectStore('payments', { keyPath: 'id' });
+      payStore.createIndex('paymentNumber', 'paymentNumber', { unique: true });
+      payStore.createIndex('invoiceId', 'invoiceId', { unique: false });
+      payStore.createIndex('clientId', 'clientId', { unique: false });
+      payStore.createIndex('paymentDate', 'paymentDate', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('projects')) {
+      const prjStore = db.createObjectStore('projects', { keyPath: 'id' });
+      prjStore.createIndex('projectNumber', 'projectNumber', { unique: true });
+      prjStore.createIndex('clientId', 'clientId', { unique: false });
+      prjStore.createIndex('status', 'status', { unique: false });
+      prjStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('attachments')) {
+      const attStore = db.createObjectStore('attachments', { keyPath: 'id' });
+      attStore.createIndex('entityType', 'entityType', { unique: false });
+      attStore.createIndex('entityId', 'entityId', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('auditEvents')) {
+      const auditStore = db.createObjectStore('auditEvents', { keyPath: 'id' });
+      auditStore.createIndex('timestamp', 'timestamp', { unique: false });
+      auditStore.createIndex('action', 'action', { unique: false });
+      auditStore.createIndex('entityType', 'entityType', { unique: false });
+      auditStore.createIndex('entityId', 'entityId', { unique: false });
+    }
+  }
+
+  // Version 2: Synchronization subsystem stores (Phase 2)
+  // Evaluated independently of oldVersion < 1 so that existing v1 databases upgrade correctly
+  if (oldVersion < 2 && (newVersion === null || newVersion >= 2)) {
+    if (!db.objectStoreNames.contains('syncOutbox')) {
+      const outbox = db.createObjectStore('syncOutbox', { keyPath: 'operationId' });
+      outbox.createIndex('createdAt', 'createdAt', { unique: false });
+      outbox.createIndex('entityId', 'entityId', { unique: false });
+      outbox.createIndex('entityType', 'entityType', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('syncMetadata')) {
+      db.createObjectStore('syncMetadata', { keyPath: 'id' });
+    }
+
+    if (!db.objectStoreNames.contains('syncConflicts')) {
+      const conflicts = db.createObjectStore('syncConflicts', { keyPath: 'operationId' });
+      conflicts.createIndex('entityId', 'entityId', { unique: false });
+      conflicts.createIndex('entityType', 'entityType', { unique: false });
+    }
+
+    if (!db.objectStoreNames.contains('syncConfig')) {
+      db.createObjectStore('syncConfig', { keyPath: 'id' });
+    }
+  }
+}
+
 export async function getDatabase(): Promise<IDBPDatabase> {
   return openDB(DB_NAME, DB_VERSION, {
-    upgrade(db, oldVersion, newVersion, transaction) {
-      // Version 1: Initial schema
-      if (oldVersion < 1) {
-        // Users Store
-        if (!db.objectStoreNames.contains('users')) {
-          const userStore = db.createObjectStore('users', { keyPath: 'id' });
-          userStore.createIndex('username', 'username', { unique: true });
-        }
-        if (oldVersion < 2) {
-          if (!db.objectStoreNames.contains('syncOutbox')) {
-            const outbox = db.createObjectStore('syncOutbox', { keyPath: 'operationId' });
-            outbox.createIndex('createdAt', 'createdAt', { unique: false });
-            outbox.createIndex('entityId', 'entityId', { unique: false });
-          }
-          if (!db.objectStoreNames.contains('syncMetadata')) {
-            db.createObjectStore('syncMetadata', { keyPath: 'id' });
-          }
-          if (!db.objectStoreNames.contains('syncConflicts')) {
-            const conflicts = db.createObjectStore('syncConflicts', { keyPath: 'operationId' });
-            conflicts.createIndex('entityId', 'entityId', { unique: false });
-          }
-        }
-
-        // Settings Store
-        if (!db.objectStoreNames.contains('settings')) {
-          db.createObjectStore('settings', { keyPath: 'id' });
-        }
-
-        // Number Sequences
-        if (!db.objectStoreNames.contains('numberSequences')) {
-          db.createObjectStore('numberSequences', { keyPath: 'prefix' });
-        }
-
-        // Clients Store
-        if (!db.objectStoreNames.contains('clients')) {
-          const clientStore = db.createObjectStore('clients', { keyPath: 'id' });
-          clientStore.createIndex('name', 'name', { unique: false });
-          clientStore.createIndex('leadStatus', 'leadStatus', { unique: false });
-          clientStore.createIndex('leadSource', 'leadSource', { unique: false });
-          clientStore.createIndex('updatedAt', 'updatedAt', { unique: false });
-        }
-
-        // Quotations Store
-        if (!db.objectStoreNames.contains('quotations')) {
-          const quotationStore = db.createObjectStore('quotations', { keyPath: 'id' });
-          quotationStore.createIndex('quotationNumber', 'quotationNumber', { unique: true });
-          quotationStore.createIndex('clientId', 'clientId', { unique: false });
-          quotationStore.createIndex('status', 'status', { unique: false });
-          quotationStore.createIndex('updatedAt', 'updatedAt', { unique: false });
-        }
-
-        // Quotation Revisions
-        if (!db.objectStoreNames.contains('quotationRevisions')) {
-          const revStore = db.createObjectStore('quotationRevisions', { keyPath: 'id' });
-          revStore.createIndex('quotationId', 'quotationId', { unique: false });
-        }
-
-        // Invoices Store
-        if (!db.objectStoreNames.contains('invoices')) {
-          const invStore = db.createObjectStore('invoices', { keyPath: 'id' });
-          invStore.createIndex('invoiceNumber', 'invoiceNumber', { unique: true });
-          invStore.createIndex('clientId', 'clientId', { unique: false });
-          invStore.createIndex('quotationId', 'quotationId', { unique: false });
-          invStore.createIndex('projectId', 'projectId', { unique: false });
-          invStore.createIndex('status', 'status', { unique: false });
-          invStore.createIndex('dueDate', 'dueDate', { unique: false });
-          invStore.createIndex('updatedAt', 'updatedAt', { unique: false });
-        }
-
-        // Payments Store
-        if (!db.objectStoreNames.contains('payments')) {
-          const payStore = db.createObjectStore('payments', { keyPath: 'id' });
-          payStore.createIndex('paymentNumber', 'paymentNumber', { unique: true });
-          payStore.createIndex('invoiceId', 'invoiceId', { unique: false });
-          payStore.createIndex('clientId', 'clientId', { unique: false });
-          payStore.createIndex('paymentDate', 'paymentDate', { unique: false });
-        }
-
-        // Projects Store
-        if (!db.objectStoreNames.contains('projects')) {
-          const prjStore = db.createObjectStore('projects', { keyPath: 'id' });
-          prjStore.createIndex('projectNumber', 'projectNumber', { unique: true });
-          prjStore.createIndex('clientId', 'clientId', { unique: false });
-          prjStore.createIndex('status', 'status', { unique: false });
-          prjStore.createIndex('updatedAt', 'updatedAt', { unique: false });
-        }
-
-        // Attachments Metadata & Blobs Store
-        if (!db.objectStoreNames.contains('attachments')) {
-          const attStore = db.createObjectStore('attachments', { keyPath: 'id' });
-          attStore.createIndex('entityType', 'entityType', { unique: false });
-          attStore.createIndex('entityId', 'entityId', { unique: false });
-        }
-
-        // Audit Events Store
-        if (!db.objectStoreNames.contains('auditEvents')) {
-          const auditStore = db.createObjectStore('auditEvents', { keyPath: 'id' });
-          auditStore.createIndex('timestamp', 'timestamp', { unique: false });
-          auditStore.createIndex('action', 'action', { unique: false });
-          auditStore.createIndex('entityType', 'entityType', { unique: false });
-          auditStore.createIndex('entityId', 'entityId', { unique: false });
-        }
-      }
+    upgrade(db, oldVersion, newVersion) {
+      upgradeDatabaseSchema(db, oldVersion, newVersion);
     },
   });
 }
@@ -211,10 +253,13 @@ export async function clearAllDatabaseData(): Promise<void> {
     'syncOutbox',
     'syncMetadata',
     'syncConflicts',
+    'syncConfig',
   ];
   const tx = db.transaction(stores, 'readwrite');
   for (const storeName of stores) {
-    await tx.objectStore(storeName).clear();
+    if (db.objectStoreNames.contains(storeName)) {
+      await tx.objectStore(storeName).clear();
+    }
   }
   await tx.done;
 }

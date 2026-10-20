@@ -33,5 +33,17 @@ public sealed record ChangesResponse(
     string? NextCursor,
     bool ResyncRequired = false);
 
+public sealed record SnapshotEntityDto(
+    string EntityType,
+    Guid EntityId,
+    string Revision,
+    object? Payload);
+
+public sealed record SnapshotResponse(
+    IReadOnlyList<SnapshotEntityDto> Entities,
+    string SnapshotCursor,
+    bool HasMore = false);
+
 public sealed record RegisterDeviceRequest(Guid BusinessId, string BusinessName, string DeviceName);
 public sealed record RegisterDeviceResponse(Guid BusinessId, Guid DeviceId, string DeviceToken);
+public sealed record DeviceSummaryDto(Guid Id, Guid BusinessId, string Name, DateTime RegisteredAtUtc, DateTime? RevokedAtUtc);

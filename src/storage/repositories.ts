@@ -1,9 +1,9 @@
 /**
  * SentinelOps - Repository Layer for IndexedDB Entities
- * Encapsulates data access, transactional updates, and integrity rules.
+ * Encapsulates data access, transactional updates, durable outbox queuing, and integrity rules.
  */
 
-import { getDatabase, DEFAULT_SETTINGS } from './database';
+import { getDatabase, DEFAULT_SETTINGS, SyncOutboxRecord, SyncConfig, SyncConflictRecord, SyncMetadata } from './database';
 import {
   LocalUser,
   AppSettings,
@@ -22,7 +22,36 @@ import {
 import { generateUUID } from '../services/security';
 import { calculateTotals, isInvoiceOverdue } from '../domain/calculations';
 
+/**
+ * Enqueue an outbox record inside an active readwrite transaction.
+ * If the transaction aborts, the outbox record is rolled back with the entity change.
+ */
+function enqueueOutboxRecord(
+  outboxStore: any,
+  entityType: string,
+  entityId: string,
+  operation: 'upsert' | 'delete',
+  payload: unknown,
+  baseRevision: string | null = null
+): SyncOutboxRecord {
+  const record: SyncOutboxRecord = {
+    operationId: generateUUID(),
+    entityType,
+    entityId,
+    operation,
+    baseRevision,
+    payload,
+    createdAt: new Date().toISOString(),
+    attempts: 0,
+    status: 'pending',
+  };
+  outboxStore.put(record);
+  return record;
+}
+
 // ======================== USERS & AUTH ========================
+// NOTE: Local users and authentication hashes are intentionally local-only
+// and are never placed in the sync outbox.
 export const userRepository = {
   async hasAnyUser(): Promise<boolean> {
     const db = await getDatabase();
@@ -54,7 +83,6 @@ export const settingsRepository = {
     const db = await getDatabase();
     const settings = (await db.get('settings', 'current_settings')) as AppSettings | undefined;
     if (!settings) {
-      // First-run default
       await db.put('settings', DEFAULT_SETTINGS);
       return DEFAULT_SETTINGS;
     }
@@ -63,14 +91,48 @@ export const settingsRepository = {
 
   async saveSettings(settings: AppSettings, actorName = 'Admin'): Promise<AppSettings> {
     const db = await getDatabase();
-    const updated = {
+    const updated: AppSettings = {
       ...settings,
       id: 'current_settings' as const,
       updatedAt: new Date().toISOString(),
     };
-    await db.put('settings', updated);
 
-    await auditRepository.logEvent({
+    const tx = db.transaction(['settings', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('settings').put(updated);
+
+    // Enqueue synchronized business settings (public business profile only)
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Settings',
+      'current_settings',
+      'upsert',
+      {
+        businessName: updated.businessName,
+        tradingName: updated.tradingName,
+        tagline: updated.tagline,
+        tinNumber: updated.tinNumber,
+        contactNumber: updated.contactNumber,
+        email: updated.email,
+        website: updated.website,
+        address: updated.address,
+        city: updated.city,
+        region: updated.region,
+        postalCode: updated.postalCode,
+        currency: updated.currency,
+        currencySymbol: updated.currencySymbol,
+        taxMode: updated.taxMode,
+        taxRatePercent: updated.taxRatePercent,
+        defaultQuotationValidityDays: updated.defaultQuotationValidityDays,
+        defaultPaymentTerms: updated.defaultPaymentTerms,
+        defaultWarrantyTerms: updated.defaultWarrantyTerms,
+        defaultQuotationNotes: updated.defaultQuotationNotes,
+        updatedAt: updated.updatedAt,
+      }
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'SETTINGS_UPDATE',
       entityType: 'Settings',
       entityId: 'current_settings',
@@ -78,8 +140,10 @@ export const settingsRepository = {
       actorId: 'admin',
       actorName,
       details: { businessName: updated.businessName, taxMode: updated.taxMode },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return updated;
   },
 };
@@ -100,7 +164,6 @@ export const auditRepository = {
   async getAll(): Promise<AuditEvent[]> {
     const db = await getDatabase();
     const events = (await db.getAll('auditEvents')) as AuditEvent[];
-    // Sort descending by timestamp
     return events.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   },
 };
@@ -119,21 +182,37 @@ export const clientRepository = {
     return (client as Client) || null;
   },
 
-  async save(client: Omit<Client, 'id' | 'createdAt' | 'updatedAt'> & { id?: ID }, actorName = 'Admin'): Promise<Client> {
+  async save(
+    client: Omit<Client, 'id' | 'createdAt' | 'updatedAt'> & { id?: ID },
+    actorName = 'Admin'
+  ): Promise<Client> {
     const db = await getDatabase();
     const now = new Date().toISOString();
     const isNew = !client.id;
 
+    const existing = client.id ? ((await db.get('clients', client.id)) as Client | undefined) : undefined;
     const fullClient: Client = {
       ...client,
       id: client.id || generateUUID(),
-      createdAt: isNew ? now : (await db.get('clients', client.id!))?.createdAt || now,
+      createdAt: isNew ? now : existing?.createdAt || now,
       updatedAt: now,
     };
 
-    await db.put('clients', fullClient);
+    const tx = db.transaction(['clients', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('clients').put(fullClient);
 
-    await auditRepository.logEvent({
+    // Atomic Outbox Enqueue
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Client',
+      fullClient.id,
+      'upsert',
+      fullClient
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: now,
       action: isNew ? 'CLIENT_CREATE' : 'CLIENT_UPDATE',
       entityType: 'Client',
       entityId: fullClient.id,
@@ -141,8 +220,10 @@ export const clientRepository = {
       actorId: 'admin',
       actorName,
       details: { leadStatus: fullClient.leadStatus, leadSource: fullClient.leadSource },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return fullClient;
   },
 
@@ -150,15 +231,24 @@ export const clientRepository = {
     const db = await getDatabase();
     const quotations = await db.getAllFromIndex('quotations', 'clientId', id);
     if (quotations.length > 0) {
-      return { canDelete: false, reason: `Cannot delete client with ${quotations.length} linked quotation(s). Mark status as Lost instead to preserve historical records.` };
+      return {
+        canDelete: false,
+        reason: `Cannot delete client with ${quotations.length} linked quotation(s). Mark status as Lost instead to preserve historical records.`,
+      };
     }
     const invoices = await db.getAllFromIndex('invoices', 'clientId', id);
     if (invoices.length > 0) {
-      return { canDelete: false, reason: `Cannot delete client with ${invoices.length} linked invoice(s). Financial records must be preserved.` };
+      return {
+        canDelete: false,
+        reason: `Cannot delete client with ${invoices.length} linked invoice(s). Financial records must be preserved.`,
+      };
     }
     const projects = await db.getAllFromIndex('projects', 'clientId', id);
     if (projects.length > 0) {
-      return { canDelete: false, reason: `Cannot delete client with ${projects.length} linked project(s).` };
+      return {
+        canDelete: false,
+        reason: `Cannot delete client with ${projects.length} linked project(s).`,
+      };
     }
     return { canDelete: true };
   },
@@ -170,19 +260,34 @@ export const clientRepository = {
     }
     const db = await getDatabase();
     const existing = await this.getById(id);
-    await db.delete('clients', id);
+    if (!existing) return false;
 
-    if (existing) {
-      await auditRepository.logEvent({
-        action: 'CLIENT_UPDATE',
-        entityType: 'Client',
-        entityId: id,
-        entityLabel: existing.name,
-        actorId: 'admin',
-        actorName,
-        details: { action: 'deleted' },
-      });
-    }
+    const tx = db.transaction(['clients', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('clients').delete(id);
+
+    // Atomic Tombstone Enqueue
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Client',
+      id,
+      'delete',
+      { id, deletedAt: new Date().toISOString() }
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
+      action: 'CLIENT_UPDATE',
+      entityType: 'Client',
+      entityId: id,
+      entityLabel: existing.name,
+      actorId: 'admin',
+      actorName,
+      details: { action: 'deleted' },
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
+
+    await tx.done;
     return true;
   },
 };
@@ -218,10 +323,22 @@ export const quotationRepository = {
       createdAt: existing ? existing.createdAt : quotation.createdAt || now,
     };
 
-    await db.put('quotations', record);
-
     const isNew = !existing;
-    await auditRepository.logEvent({
+    const tx = db.transaction(['quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('quotations').put(record);
+
+    // Atomic Outbox Enqueue
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Quotation',
+      record.id,
+      'upsert',
+      record
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: now,
       action: isNew ? 'QUOTATION_CREATE' : 'QUOTATION_UPDATE',
       entityType: 'Quotation',
       entityId: record.id,
@@ -233,8 +350,10 @@ export const quotationRepository = {
         grandTotalCentavos: record.grandTotalCentavos,
         clientName: record.clientName,
       },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return record;
   },
 
@@ -258,16 +377,34 @@ export const quotationRepository = {
       createdBy: actorName,
     };
 
-    const tx = db.transaction(['quotationRevisions', 'quotations', 'auditEvents'], 'readwrite');
-    await tx.objectStore('quotationRevisions').put(revision);
-
     current.revisionNumber = nextRevNum;
     current.updatedAt = new Date().toISOString();
+
+    const tx = db.transaction(['quotationRevisions', 'quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('quotationRevisions').put(revision);
     await tx.objectStore('quotations').put(current);
 
-    await tx.done;
+    // Outbox: QuotationRevision snapshot (append-only)
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'QuotationRevision',
+      revision.id,
+      'upsert',
+      revision
+    );
 
-    await auditRepository.logEvent({
+    // Outbox: Updated Quotation state
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Quotation',
+      current.id,
+      'upsert',
+      current
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'QUOTATION_REVISE',
       entityType: 'Quotation',
       entityId: current.id,
@@ -275,8 +412,10 @@ export const quotationRepository = {
       actorId: 'admin',
       actorName,
       details: { revisionNumber: current.revisionNumber, reason },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return revision;
   },
 
@@ -291,13 +430,25 @@ export const quotationRepository = {
     const quotation = (await db.get('quotations', id)) as Quotation | undefined;
     if (!quotation) return false;
 
-    // Check if converted to invoice
     if (quotation.convertedToInvoiceId) {
       throw new Error('Cannot delete quotation that has already been converted to an invoice.');
     }
 
-    await db.delete('quotations', id);
-    await auditRepository.logEvent({
+    const tx = db.transaction(['quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('quotations').delete(id);
+
+    // Outbox tombstone
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Quotation',
+      id,
+      'delete',
+      { id, quotationNumber: quotation.quotationNumber, deletedAt: new Date().toISOString() }
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'QUOTATION_UPDATE',
       entityType: 'Quotation',
       entityId: id,
@@ -305,7 +456,10 @@ export const quotationRepository = {
       actorId: 'admin',
       actorName,
       details: { deleted: true },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
+
+    await tx.done;
     return true;
   },
 };
@@ -315,7 +469,6 @@ export const invoiceRepository = {
   async getAll(): Promise<Invoice[]> {
     const db = await getDatabase();
     const invoices = (await db.getAll('invoices')) as Invoice[];
-    // Auto-evaluate overdue status
     const today = new Date().toISOString().split('T')[0];
     return invoices
       .map((inv) => {
@@ -361,10 +514,22 @@ export const invoiceRepository = {
       createdAt: existing ? existing.createdAt : invoice.createdAt || now,
     };
 
-    await db.put('invoices', record);
-
     const isNew = !existing;
-    await auditRepository.logEvent({
+    const tx = db.transaction(['invoices', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('invoices').put(record);
+
+    // Atomic Outbox Enqueue
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Invoice',
+      record.id,
+      'upsert',
+      record
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: now,
       action: isNew ? 'INVOICE_CREATE' : 'INVOICE_ISSUE',
       entityType: 'Invoice',
       entityId: record.id,
@@ -376,8 +541,10 @@ export const invoiceRepository = {
         grandTotalCentavos: record.grandTotalCentavos,
         remainingBalanceCentavos: record.remainingBalanceCentavos,
       },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return record;
   },
 
@@ -393,9 +560,21 @@ export const invoiceRepository = {
     inv.notes = (inv.notes ? inv.notes + '\n' : '') + `[VOIDED by ${actorName}: ${reason}]`;
     inv.updatedAt = new Date().toISOString();
 
-    await db.put('invoices', inv);
+    const tx = db.transaction(['invoices', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('invoices').put(inv);
 
-    await auditRepository.logEvent({
+    // Outbox: voided invoice update
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Invoice',
+      inv.id,
+      'upsert',
+      inv
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'INVOICE_VOID',
       entityType: 'Invoice',
       entityId: inv.id,
@@ -403,8 +582,10 @@ export const invoiceRepository = {
       actorId: 'admin',
       actorName,
       details: { reason },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return inv;
   },
 };
@@ -438,9 +619,10 @@ export const paymentRepository = {
     }
 
     const db = await getDatabase();
-    const tx = db.transaction(['invoices', 'payments', 'projects', 'auditEvents'], 'readwrite');
+    const tx = db.transaction(['invoices', 'payments', 'projects', 'syncOutbox', 'auditEvents'], 'readwrite');
     const invoiceStore = tx.objectStore('invoices');
     const paymentStore = tx.objectStore('payments');
+    const outboxStore = tx.objectStore('syncOutbox');
 
     const invoice = (await invoiceStore.get(payment.invoiceId)) as Invoice | undefined;
     if (!invoice) throw new Error('Invoice not found');
@@ -459,7 +641,6 @@ export const paymentRepository = {
     invoice.remainingBalanceCentavos = newRemaining;
     invoice.status = newRemaining === 0 ? 'Paid' : 'Partially Paid';
     invoice.updatedAt = new Date().toISOString();
-
     await invoiceStore.put(invoice);
 
     const paymentRecord: Payment = {
@@ -469,7 +650,6 @@ export const paymentRepository = {
       isReversed: false,
       createdAt: new Date().toISOString(),
     };
-
     await paymentStore.put(paymentRecord);
 
     // Update project totalPaid if linked
@@ -480,12 +660,17 @@ export const paymentRepository = {
         project.totalPaidCentavos = (project.totalPaidCentavos || 0) + payment.amountCentavos;
         project.updatedAt = new Date().toISOString();
         await projectStore.put(project);
+        enqueueOutboxRecord(outboxStore, 'Project', project.id, 'upsert', project);
       }
     }
 
-    await tx.done;
+    // Atomic Outbox Enqueue: Payment (financial event) + Invoice updated state
+    enqueueOutboxRecord(outboxStore, 'Payment', paymentRecord.id, 'upsert', paymentRecord);
+    enqueueOutboxRecord(outboxStore, 'Invoice', invoice.id, 'upsert', invoice);
 
-    await auditRepository.logEvent({
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'PAYMENT_RECORD',
       entityType: 'Payment',
       entityId: paymentRecord.id,
@@ -497,16 +682,19 @@ export const paymentRepository = {
         paymentMethod: paymentRecord.paymentMethod,
         remainingBalanceCentavos: newRemaining,
       },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return paymentRecord;
   },
 
   async reversePayment(paymentId: ID, reason: string, actorName = 'Admin'): Promise<Payment> {
     const db = await getDatabase();
-    const tx = db.transaction(['invoices', 'payments', 'projects', 'auditEvents'], 'readwrite');
+    const tx = db.transaction(['invoices', 'payments', 'projects', 'syncOutbox', 'auditEvents'], 'readwrite');
     const paymentStore = tx.objectStore('payments');
     const invoiceStore = tx.objectStore('invoices');
+    const outboxStore = tx.objectStore('syncOutbox');
 
     const payment = (await paymentStore.get(paymentId)) as Payment | undefined;
     if (!payment) throw new Error('Payment not found');
@@ -515,7 +703,6 @@ export const paymentRepository = {
     const invoice = (await invoiceStore.get(payment.invoiceId)) as Invoice | undefined;
     if (!invoice) throw new Error('Linked invoice not found');
 
-    // Recompute invoice amounts
     const restoredPaidAmount = Math.max(0, invoice.paidAmountCentavos - payment.amountCentavos);
     const restoredRemaining = invoice.grandTotalCentavos - restoredPaidAmount;
 
@@ -529,7 +716,6 @@ export const paymentRepository = {
     payment.reversalReason = reason;
     await paymentStore.put(payment);
 
-    // Reverse project paid amount if linked
     if (invoice.projectId) {
       const projectStore = tx.objectStore('projects');
       const project = (await projectStore.get(invoice.projectId)) as Project | undefined;
@@ -537,12 +723,17 @@ export const paymentRepository = {
         project.totalPaidCentavos = Math.max(0, (project.totalPaidCentavos || 0) - payment.amountCentavos);
         project.updatedAt = new Date().toISOString();
         await projectStore.put(project);
+        enqueueOutboxRecord(outboxStore, 'Project', project.id, 'upsert', project);
       }
     }
 
-    await tx.done;
+    // Atomic Outbox Enqueue: Payment reversal + Invoice restored state
+    enqueueOutboxRecord(outboxStore, 'Payment', payment.id, 'upsert', payment);
+    enqueueOutboxRecord(outboxStore, 'Invoice', invoice.id, 'upsert', invoice);
 
-    await auditRepository.logEvent({
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'PAYMENT_REVERSE',
       entityType: 'Payment',
       entityId: payment.id,
@@ -550,8 +741,10 @@ export const paymentRepository = {
       actorId: 'admin',
       actorName,
       details: { reason, amountCentavos: payment.amountCentavos },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return payment;
   },
 };
@@ -587,10 +780,22 @@ export const projectRepository = {
       createdAt: existing ? existing.createdAt : project.createdAt || now,
     };
 
-    await db.put('projects', record);
-
     const isNew = !existing;
-    await auditRepository.logEvent({
+    const tx = db.transaction(['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('projects').put(record);
+
+    // Atomic Outbox Enqueue
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Project',
+      record.id,
+      'upsert',
+      record
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: now,
       action: isNew ? 'PROJECT_CREATE' : 'PROJECT_UPDATE',
       entityType: 'Project',
       entityId: record.id,
@@ -598,8 +803,10 @@ export const projectRepository = {
       actorId: 'admin',
       actorName,
       details: { status: record.status, clientName: record.clientName },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return record;
   },
 
@@ -630,9 +837,21 @@ export const projectRepository = {
     }
     project.updatedAt = new Date().toISOString();
 
-    await db.put('projects', project);
+    const tx = db.transaction(['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('projects').put(project);
 
-    await auditRepository.logEvent({
+    // Outbox: Updated project with progress note
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Project',
+      project.id,
+      'upsert',
+      project
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: statusChange ? 'PROJECT_STATUS_CHANGE' : 'PROJECT_UPDATE',
       entityType: 'Project',
       entityId: project.id,
@@ -640,8 +859,10 @@ export const projectRepository = {
       actorId: 'admin',
       actorName: author,
       details: { text, statusChange },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return project;
   },
 
@@ -650,14 +871,26 @@ export const projectRepository = {
     const project = (await db.get('projects', id)) as Project | undefined;
     if (!project) return false;
 
-    // Check if invoices linked
     const invoices = (await db.getAllFromIndex('invoices', 'projectId', id)) as Invoice[];
     if (invoices.length > 0) {
       throw new Error(`Cannot delete project with ${invoices.length} linked invoice(s). Close the project instead to preserve history.`);
     }
 
-    await db.delete('projects', id);
-    await auditRepository.logEvent({
+    const tx = db.transaction(['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('projects').delete(id);
+
+    // Outbox tombstone
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Project',
+      id,
+      'delete',
+      { id, projectNumber: project.projectNumber, deletedAt: new Date().toISOString() }
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'PROJECT_UPDATE',
       entityType: 'Project',
       entityId: id,
@@ -665,7 +898,10 @@ export const projectRepository = {
       actorId: 'admin',
       actorName,
       details: { deleted: true },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
+
+    await tx.done;
     return true;
   },
 };
@@ -680,9 +916,31 @@ export const attachmentRepository = {
 
   async saveAttachment(record: AttachmentRecord, actorName = 'Admin'): Promise<AttachmentRecord> {
     const db = await getDatabase();
-    await db.put('attachments', record);
+    const tx = db.transaction(['attachments', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('attachments').put(record);
 
-    await auditRepository.logEvent({
+    // Outbox metadata (omits raw binary blob to avoid bloating sync feed payloads)
+    const metadataPayload: AttachmentMetadata = {
+      id: record.id,
+      entityType: record.entityType,
+      entityId: record.entityId,
+      fileName: record.fileName,
+      fileType: record.fileType,
+      fileSize: record.fileSize,
+      caption: record.caption,
+      uploadedAt: record.uploadedAt,
+    };
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Attachment',
+      record.id,
+      'upsert',
+      metadataPayload
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'ATTACHMENT_ADD',
       entityType: 'Attachment',
       entityId: record.id,
@@ -694,8 +952,10 @@ export const attachmentRepository = {
         fileType: record.fileType,
         parentEntity: `${record.entityType}:${record.entityId}`,
       },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return record;
   },
 
@@ -704,9 +964,21 @@ export const attachmentRepository = {
     const existing = (await db.get('attachments', id)) as AttachmentRecord | undefined;
     if (!existing) return false;
 
-    await db.delete('attachments', id);
+    const tx = db.transaction(['attachments', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('attachments').delete(id);
 
-    await auditRepository.logEvent({
+    // Outbox tombstone
+    enqueueOutboxRecord(
+      tx.objectStore('syncOutbox'),
+      'Attachment',
+      id,
+      'delete',
+      { id, fileName: existing.fileName, deletedAt: new Date().toISOString() }
+    );
+
+    const auditEvent: AuditEvent = {
+      id: generateUUID(),
+      timestamp: new Date().toISOString(),
       action: 'ATTACHMENT_DELETE',
       entityType: 'Attachment',
       entityId: id,
@@ -714,8 +986,60 @@ export const attachmentRepository = {
       actorId: 'admin',
       actorName,
       details: { parentEntity: `${existing.entityType}:${existing.entityId}` },
-    });
+    };
+    await tx.objectStore('auditEvents').put(auditEvent);
 
+    await tx.done;
     return true;
+  },
+};
+
+// ======================== SYNC SUBSYSTEM REPOSITORIES ========================
+export const syncConfigRepository = {
+  async getConfig(): Promise<SyncConfig | null> {
+    const db = await getDatabase();
+    const config = (await db.get('syncConfig', 'current_config')) as SyncConfig | undefined;
+    return config || null;
+  },
+
+  async saveConfig(config: SyncConfig): Promise<SyncConfig> {
+    const db = await getDatabase();
+    await db.put('syncConfig', { ...config, id: 'current_config' as const });
+    return config;
+  },
+
+  async clearConfig(): Promise<void> {
+    const db = await getDatabase();
+    await db.delete('syncConfig', 'current_config');
+  },
+};
+
+export const syncOutboxRepository = {
+  async getPendingCount(): Promise<number> {
+    const db = await getDatabase();
+    return await db.count('syncOutbox');
+  },
+
+  async getPendingOperations(limit = 100): Promise<SyncOutboxRecord[]> {
+    const db = await getDatabase();
+    const ops = (await db.getAllFromIndex('syncOutbox', 'createdAt')) as SyncOutboxRecord[];
+    return ops.slice(0, limit);
+  },
+
+  async clearOutbox(): Promise<void> {
+    const db = await getDatabase();
+    await db.clear('syncOutbox');
+  },
+};
+
+export const syncConflictRepository = {
+  async getAll(): Promise<SyncConflictRecord[]> {
+    const db = await getDatabase();
+    return (await db.getAll('syncConflicts')) as SyncConflictRecord[];
+  },
+
+  async resolveConflict(operationId: string): Promise<void> {
+    const db = await getDatabase();
+    await db.delete('syncConflicts', operationId);
   },
 };

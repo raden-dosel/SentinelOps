@@ -1,0 +1,422 @@
+# SentinelOps Phase 2 — Findings Remediation, Additional Fixes, and Deployment Implementation Prompt
+
+## ROLE
+
+Act as a Principal Software Architect, Senior .NET Engineer, React/TypeScript Engineer, PostgreSQL Engineer, Synchronization Specialist, Application Security Engineer, DevOps Engineer, and QA Automation Engineer.
+
+Your task is to **re-audit and remediate the actual SentinelOps Phase 2 implementation**: ASP.NET Core Web API + PostgreSQL + IndexedDB Sync Adapter. Do not stop at producing another audit. Implement the fixes that can be made safely, add the necessary tests and documentation, and produce an evidence-backed deployment recommendation for an easy, low-cost or $0 initial setup.
+
+The source audit reported that the repository builds and that a generic push/pull protocol works locally, but the system is **not ready for production multi-tablet synchronization**. Treat the source audit below as a lead list, not as proof of the current repository state. Re-check every finding against the code as it exists when this prompt is run.
+
+---
+
+## 1. NON-NEGOTIABLE WORKFLOW
+
+### 1.1 Inspect before editing
+
+1. Inspect the repository, current Git branch, working tree, recent commits, project structure, README, architecture notes, CI workflows, migrations, API controllers, IndexedDB schema, repositories, sync service, backup/restore code, and existing tests.
+2. Record pre-existing user changes. Do not discard, overwrite, reset, or clean unrelated files.
+3. Re-run available baseline checks before changing code where practical. Record exact commands and results.
+4. Map each source finding to current code locations and current evidence. Mark it **Already fixed**, **Verified finding**, **Partially fixed**, **Not reproducible**, or **Blocked**.
+5. Create a prioritized remediation plan, then continue directly into implementation. Do not stop after the plan or audit report.
+
+### 1.2 Preserve previous work
+
+- Make targeted, reviewable changes. Preserve Phase 1 features, UI, domain behavior, API contracts, schema history, PWA behavior, and existing user work unless a change is necessary to remediate a documented defect.
+- Do not perform unrelated refactors or reformat whole files without a real need.
+- Do not delete business data, reset the database, replace the application architecture, or regenerate existing work wholesale.
+- Never run destructive Git commands or reset the working tree.
+- Do not use production secrets, real customer records, or real financial data for tests.
+- Keep generated `bin/`, `obj/`, build output, and local secrets out of commits where the existing repository policy requires it.
+- If a necessary fix conflicts with a previously approved feature, public API, data format, or architectural decision, **stop that specific conflicting change**, explain the exact conflict and impact, and request permission. Continue with independent, nonconflicting remediation.
+
+### 1.3 Implement in small verified increments
+
+For each remediation group: change the code, add/update tests, run relevant verification, review the diff for regressions, and update the status report. Do not label a fix complete merely because the code compiles.
+
+If a runtime, SDK, database, browser, or hosting credential is unavailable, implement what can be safely implemented, add reproducible tests or a documented manual procedure, and clearly identify the remaining blocker. Never claim an external deployment, backup, restore, or two-device test occurred if it did not.
+
+---
+
+## 2. CURRENT BASELINE REPORTED BY THE SOURCE AUDIT
+
+The previous audit reported the following. Re-verify each item rather than assuming it is still true:
+
+1. The v1-to-v2 IndexedDB upgrade condition nests sync-store creation under `oldVersion < 1`, meaning an existing v1 database may not get `syncOutbox`, `syncMetadata`, and `syncConflicts`.
+2. The frontend has `enqueueSyncOperation`, `pushSyncOperations`, and `pullSyncChanges` helpers, but normal repository mutations reportedly do not call them. A device registration/configuration flow, sync coordinator, visible status, and reliable retry loop are missing.
+3. The server stores generic JSON payloads in a generic sync entity store and does not enforce the business invariants required for clients, quotations/revisions, invoices, payments, projects, and attachments.
+4. The frontend applies pulled records and persists the pull cursor separately, rather than atomically applying records/tombstones/conflicts and advancing the cursor in one IndexedDB transaction.
+5. There is no retention-aware cursor expiry or complete `ResyncRequired` recovery path.
+6. Device registration/token lifecycle lacks production-ready expiry, rotation, revocation workflow, and audit coverage. Registration appears to depend on a shared bootstrap token and accepts client-submitted business identity.
+7. Sync cursors are encoded but may not be authenticated or validated against the authoritative server sequence, allowing a client to forge a high cursor and skip changes.
+8. Tenant/business isolation, authentication, CORS, HTTPS, rate limiting, and error handling are partially implemented and need adversarial verification and production configuration.
+9. Attachment byte synchronization is missing even though local attachment blobs exist.
+10. Local-to-server migration from JSON/ZIP backup is missing or not adequately tested.
+11. Centralized database backup, retention, alerting, and tested restoration are missing.
+12. CI reportedly lacks the integration and end-to-end coverage required for retries, conflicts, authorization, concurrency, migration compatibility, and two-device operation.
+13. Architecture documentation reportedly claims server audit records exist, but no corresponding audit entity/write path was found.
+14. Frontend bundle-size warnings were observed; treat this as a lower-priority optimization unless current measurements indicate a meaningful tablet usability problem.
+
+The source audit reported these checks had passed in its environment: frontend lint/type-check, 17 frontend tests, Vite production build, .NET 10 API build, 4 API unit tests, local EF migrations against PostgreSQL 16, local liveness/readiness endpoints, a device registration token check, and a basic authenticated generic push/pull smoke test. **These checks do not prove production-grade or multi-tablet synchronization.** Re-run checks using the present environment and report the real results.
+
+---
+
+## 3. REQUIRED REMEDIATION
+
+### P0 — Prevent database migration failure and local data inconsistency
+
+#### 3.1 Repair IndexedDB migration
+
+- Fix the upgrade logic so every schema version has a distinct, correctly guarded migration, including `oldVersion < 2` for sync stores when the current version is 2.
+- Make migrations safe for new installations, existing v1 installations, and any later supported schema versions.
+- Do not delete or recreate Phase 1 business stores as a shortcut.
+- Add automated upgrade tests that create a genuine v1 database, upgrade it to the current version, and verify that original records remain readable and all required sync stores/indexes exist.
+- Add tests for fresh install, repeated initialization, and interrupted/error migration behavior where the test tooling supports it.
+
+#### 3.2 Make local mutations and outbox writes atomic
+
+- Trace all supported mutation entry points for clients, quotations, quotation revisions, invoices, payments, projects, progress notes, and deletions.
+- Ensure each supported local mutation is committed together with its corresponding durable outbox operation in the same IndexedDB read/write transaction. If the transaction fails, neither the record change nor its outbox operation should be committed.
+- Preserve stable UUID identities and define an explicit supported sync schema/version for each entity type.
+- Track operation state, attempt count, retry eligibility, last error classification, and timestamps without storing secrets in the outbox.
+- Coalesce unsent operations only when safe; never merge away financial history, issued document revisions, or append-only payment events.
+- Ensure deletes generate durable tombstones rather than silently disappearing from the sync history.
+- Add tests proving all relevant repository mutations enqueue exactly one logical operation and rollback correctly on storage failure.
+
+#### 3.3 Implement a sync coordinator and usable sync UI
+
+- Connect the existing sync helpers to real application actions; orphaned helper functions are not a completed sync implementation.
+- Add safe configuration for API base URL and authorized device/business enrollment. Never hardcode production URLs or tokens in the client bundle.
+- Implement explicit first-device/business provisioning or invitation/claim flow appropriate to the current account model. Do not allow an arbitrary client-submitted business ID to create or join a business merely because it knows a reusable shared token.
+- Show clear states such as `Not configured`, `Offline`, `Pending`, `Syncing`, `Synced`, `Conflict`, and `Needs attention`, together with last successful sync and pending-item count.
+- Support manual sync and reliable foreground sync. Use browser background capabilities only where supported; do not promise guaranteed background execution on Android.
+- Add bounded exponential backoff with jitter for transient network/server failures, respect retryable status codes, and avoid retry storms. Permanent validation/authorization failures must be surfaced for resolution rather than retried forever.
+- Prevent overlapping sync runs, duplicate submissions, and concurrent cursor consumers. Cancel/ignore stale UI results safely.
+- Keep the application fully usable offline. Pending local operations must not disappear during logout, reload, browser suspension, or network loss.
+- Add tests for offline edits, reload, reconnection, retry, double-tap/manual concurrent sync, token expiry, and visible error handling.
+
+### P0 — Enforce business integrity on the server
+
+#### 3.4 Replace unsafe generic business persistence where necessary
+
+- The generic change-feed protocol may remain an internal transport mechanism, but it must not be the sole validation boundary for financial and operational domain records.
+- Introduce typed DTOs/commands, validators, and domain/application services for supported synchronized entities.
+- Validate payload size, required fields, enum values, identifiers, data types, string lengths, attachment references, ownership, allowed state transitions, and supported schema versions.
+- Enforce server-side referential integrity and appropriate unique constraints, including document numbers per business and supported document category.
+- Use PostgreSQL transactions for each logically atomic operation and its idempotency record, domain write, change-feed event, and required audit event.
+- Return stable, documented validation/conflict responses that the client can resolve; do not return arbitrary database exception details.
+- Do not trust client-provided totals or balance values. Recompute derived financial values from validated line items and canonical pricing/tax rules, or verify them using a documented canonical rule.
+- Preserve issued quotation/invoice snapshots and revision history. Do not silently overwrite issued financial documents from another device.
+
+#### 3.5 Protect financial domain invariants
+
+- Payments must be represented as durable financial events. Corrections should use explicit reversal/adjustment records or an equally auditable design; do not silently overwrite or delete payment history.
+- Prevent duplicate payment application through idempotency and database constraints.
+- Enforce permitted payment amounts and outstanding-balance rules according to the existing approved business behavior. If overpayment/refund handling is not defined, do not invent behavior: document the decision and request approval for that domain rule.
+- Distinguish invoice total, billed amount, collected payments, outstanding balance, and revenue. Do not assume they are interchangeable.
+- Use decimal-safe calculations, explicit rounding, and server-side validation.
+- Enforce legal state transitions for invoices, quotations, revisions, projects, and payment reversal/void operations.
+- Add integration tests for duplicate payments, out-of-order updates, invalid totals, invalid relationships, concurrent writers, issued-document modification, and replayed idempotency keys.
+
+### P0 — Make pull application crash-safe and recoverable
+
+#### 3.6 Atomic client pull transaction
+
+- Refactor the coordinator so it owns the complete pull-application transaction.
+- In one IndexedDB read/write transaction, apply validated entity changes, process tombstones, record conflict state where applicable, and persist the next cursor.
+- A cursor must never advance if any record application fails.
+- Replays must be safe and idempotent.
+- Do not perform network requests or unrelated long-running asynchronous work inside a transaction in ways that cause IndexedDB transactions to become inactive.
+- Add crash/failure simulation tests for failure before application, during application, and before commit; verify that retry neither skips changes nor corrupts state.
+
+#### 3.7 Authenticated cursors, ordering, and concurrent writers
+
+- Make cursors opaque and integrity-protected, or store enough server-side state to validate them authoritatively. Do not trust a client-supplied sequence simply because it is encoded.
+- Bind cursor state to the authenticated business/tenant and relevant feed/version.
+- Reject malformed, forged, cross-business, unsupported, or future cursors with a stable response.
+- Ensure server change ordering is monotonic under concurrent writers and that pull pagination cannot skip rows at page boundaries.
+- Add tests for concurrent pushes, cursor replay, cursor tampering, cross-business cursor reuse, identical timestamps, pagination boundaries, and repeated pulls.
+
+#### 3.8 Retention-aware resynchronization
+
+- Define and document a change-feed retention strategy and the conditions under which a cursor becomes stale.
+- Return a documented `ResyncRequired` response when incremental history can no longer satisfy a request.
+- Implement a safe business-scoped snapshot/full-resync path with pagination or chunking appropriate to the data size.
+- Preserve unsent local changes during resynchronization. Never overwrite the local database wholesale if it contains pending edits.
+- Reconcile pending local operations against the authoritative snapshot through normal domain validation and conflict rules.
+- Apply snapshot pages safely and mark the final snapshot cursor only when the required data set has been successfully applied.
+- Add tests for stale cursors, snapshot interruption, continuation, pending local changes, deletions, and retry.
+
+### P1 — Close device authentication and production security gaps
+
+#### 3.9 Device and user authorization
+
+- Review and document the threat model and intended ownership model: business, user, device, device credential, and authorized operations.
+- Replace production dependence on a permanent shared registration token with a limited bootstrap process, invitation/claim flow, administrator approval, or a similarly controlled design.
+- Do not trust a business ID/name supplied by an untrusted tablet as proof of business membership.
+- Store only cryptographic hashes of high-entropy device tokens server-side; return a raw token only when necessary at enrollment and never log it.
+- Add token expiry, rotation, revocation, last-seen tracking, and administrative lost-device recovery. A revoked device must lose access immediately or within a documented, tested bound.
+- Add authentication and authorization tests for cross-business reads/writes, revoked credentials, expired tokens, missing device binding, replay, and unauthorized enrollment.
+- If full user authentication is outside this patch's safe scope, document the remaining risk and do not expose the API publicly as if device tokens alone meet the approved production security model.
+
+#### 3.10 API hardening
+
+- Configure explicit production CORS origins from environment/secret configuration. Do not use broad wildcard CORS for authenticated requests.
+- Configure HTTPS at the actual deployment edge, correctly process trusted forwarded headers, and enable HSTS where appropriate for HTTPS production hosts.
+- Do not expose PostgreSQL directly to the public internet.
+- Review IP-based rate limiting behind proxies so clients cannot trivially spoof the forwarded IP. Add separate sensible limits for enrollment/authentication and sync endpoints.
+- Enforce request body limits, JSON validation, batch limits, attachment limits, timeouts, and cancellation tokens.
+- Ensure production errors do not leak stack traces, SQL, secrets, tokens, payload contents, or internal infrastructure details.
+- Validate readiness checks against actual database connectivity while keeping liveness checks lightweight.
+- Ensure secrets are supplied through platform secret management/environment configuration and are not committed in `appsettings*.json`, workflow logs, generated docs, or frontend bundles. Remove/replace any exposed placeholder that could be confused for a production secret.
+- Add structured, redacted logs, request correlation IDs, security-relevant audit events, and operational counters for sync failures/latency without logging sensitive business payloads.
+- Add integration tests for CORS, HTTPS/forwarded-header assumptions where testable, rate limiting, request validation, readiness failure, production error output, and secret leakage checks.
+
+### P1 — Complete auditability, attachments, migration, and backups
+
+#### 3.11 Server audit trail
+
+- Reconcile documentation with actual implementation. If documentation claims audit rows exist, either implement them or correct the documentation.
+- Add an append-oriented server audit model and migration for important events: device enrollment/revocation, sync operation accepted/rejected where appropriate, domain record create/update/issue/void/reversal, migration import, backup/restore administration, and authorization failures where appropriate.
+- Include timestamp, business/tenant, actor/device identity, action, entity type/ID, correlation/operation ID, and carefully minimized before/after summaries.
+- Never log passwords, raw device tokens, encryption keys, or unnecessary personal/financial payloads.
+- Write required audit events in the same database transaction as the domain change when atomic auditability is required.
+- Clearly document that an application audit table is not automatically tamper-proof against a database administrator.
+- Add tests proving critical operations generate audit events and failed transactions do not leave misleading success audit entries.
+
+#### 3.12 Attachment synchronization
+
+- Design a private, authenticated upload/download flow for photos and documents with business-scoped authorization.
+- Define maximum file size, allowed media types, safe filenames, checksum/hash, content-length validation, integrity verification, retry/resume strategy, duplicate behavior, and cleanup of abandoned uploads.
+- Avoid placing large binary blobs into generic JSON sync payloads. Use a staged metadata-plus-bytes protocol or another well-justified approach.
+- Do not serve private customer attachments through public, guessable URLs. Authorize every download and upload.
+- Keep attachment references consistent if an upload is retried or interrupted.
+- Add tests for authorization, oversized/unsupported files, checksum mismatch, interrupted transfer, duplicate upload, and tenant isolation.
+- Document storage choice, capacity limits, and cost. Do not assume a hosting provider's ephemeral local filesystem is durable attachment storage.
+
+#### 3.13 Safe local-to-server migration
+
+- Implement a dry-run migration/import tool for existing SentinelOps JSON/ZIP backups.
+- Validate schema versions, record types, relationships, attachment checksums, duplicate client/document IDs, number collisions, unsupported fields, and incompatible encryption state before writing anything.
+- Produce a human-readable preview with counts, warnings, conflicts, and a clear statement of whether import would merge or replace data.
+- Keep migration idempotent and preserve stable record IDs where safe; map IDs explicitly when remapping is required.
+- Use a transaction or staged import/checkpoint plan so partial failure can be retried or rolled back without corrupting existing server records.
+- Never replace existing production data by default. Require an explicit authorized confirmation for destructive replacement.
+- Provide a documented migration rehearsal using a synthetic backup and a rollback/recovery plan.
+
+#### 3.14 Central backups and restoration
+
+- Implement/describe a backup policy for PostgreSQL and any durable object/attachment storage.
+- Include encrypted backups, defined retention, restricted access, monitoring/alerting for failed backup jobs, and an off-host copy where feasible.
+- Do not put production secrets in backup files or logs. Define the key-management and recovery process for encrypted backups.
+- Provide a documented scheduled backup command/workflow that matches the chosen deployment platform and its actual capabilities.
+- Test restoration into a clean isolated database and, where applicable, restore attachment objects and references.
+- Record measurable recovery objectives (RPO/RTO) only if the chosen design can support them; otherwise label them as targets, not guarantees.
+- Do not call a backup system complete until a restore test passes.
+
+### P1 — Tests, CI and two-device behavior
+
+#### 3.15 Required automated coverage
+
+Add tests using the existing tooling where possible, covering at minimum:
+
+- IndexedDB v1-to-v2 upgrade preservation.
+- Atomic local record-plus-outbox mutation.
+- Outbox retries, duplicate operations, and idempotent push.
+- Replayed and failed pulls with atomic cursor behavior.
+- Cursor signing/validation, pagination and stale-cursor resync.
+- Cross-business isolation for every relevant API operation.
+- Token expiry, rotation, revocation, and enrollment restrictions.
+- Domain validation for clients, quotations, revisions, invoices, payments, projects, and attachments.
+- Duplicate/concurrent payments and append-only correction rules.
+- Database concurrency and unique document numbering.
+- Attachment upload/download authorization and integrity.
+- Dry-run import, import retry, conflict reporting, and rollback.
+- Backup creation and automated or reproducible restore verification.
+
+Expand CI to run frontend lint/type checks, frontend tests/build, .NET format or equivalent checks as configured, API build/tests, PostgreSQL-backed integration tests, migration checks, and available browser/E2E tests. Use service containers or disposable databases in CI; never use production data.
+
+#### 3.16 Two-device acceptance scenario
+
+Create an automated browser E2E test or a reproducible manual test plan using two independent browser profiles/devices, each with distinct device credentials and separate local IndexedDB stores:
+
+1. Enroll both devices into the same authorized business.
+2. Create a client on device A and sync it to device B.
+3. Edit supported client fields on both devices while offline; reconnect and verify the documented merge/conflict policy.
+4. Create and issue a quotation and verify immutable revision history.
+5. Create an invoice and record a payment once; retry the same logical payment operation and verify it is not duplicated.
+6. Verify correct invoice balance and dashboard results after synchronization.
+7. Delete/archive a supported record and verify tombstone propagation.
+8. Simulate an expired/revoked device token and confirm safe failure with no unauthorized access.
+9. Simulate stale-cursor resynchronization without losing pending local changes.
+10. Verify attachment upload/download and authorization if attachment sync is implemented.
+11. Verify the API and frontend continue to operate offline locally and synchronize after reconnection.
+12. Confirm business A cannot access business B's records or cursors.
+
+Do not claim multi-device synchronization is production-ready until the applicable scenarios pass.
+
+---
+
+## 4. ADDITIONAL ISSUES TO RESOLVE
+
+In addition to the original audit findings, inspect and fix these cross-cutting issues where supported by code evidence:
+
+- Mismatch between architecture documentation, README, API contracts, and implemented behavior.
+- Missing or misleading comments that claim transactionality, auditing, retention, or security guarantees that the code does not actually provide.
+- Insufficient API contract versioning for future client/server compatibility.
+- Lack of explicit sync schema versioning and a clear policy for unsupported client versions.
+- Unbounded growth of outbox, change feed, tombstones, audit events, attachment metadata, or temporary uploads.
+- Race conditions around document number allocation, concurrent pushes, multiple active sync attempts, and retry idempotency.
+- Missing cancellation/timeout propagation in long-running API and storage operations.
+- Incomplete logging and operational visibility for sync lag, repeated failures, dead-lettered operations, backup failures, and database readiness.
+- PWA service worker/cache behavior that could accidentally cache authenticated API responses or private business payloads. Cache only appropriate static assets; do not cache sensitive API responses in shared caches.
+- Bundle-size/performance warnings that measurably affect tablet startup. Use dynamic imports/code splitting only if they preserve route behavior and improve measured results.
+- Incorrect environment defaults, committed credentials, misleading sample configuration, or deployment assumptions.
+
+Do not introduce a fix merely because an item appears in this list. Inspect current code, implement necessary changes, and record evidence and trade-offs.
+
+---
+
+## 5. DEPLOYMENT PROCESS AND PLATFORM RECOMMENDATION
+
+The deployment result must include a practical process, not only a list of providers. Research current official vendor documentation and plan limits when web access is available. Cite official pricing, hosting, database, storage, backup, and deployment documentation, and record the date checked. Do not assert any cloud option is permanently free without verifying its current limits.
+
+### 5.1 Compare at least these models
+
+**Option A — Existing office computer / mini-PC (predictably $0 in incremental hosting fees if hardware and internet already exist)**
+
+- Host the static PWA, ASP.NET Core API, and PostgreSQL on a computer controlled by the owner.
+- Prefer a private office LAN or owner-controlled VPN for initial use; do not expose the database port to the internet.
+- Run services using a supported process/service manager or containers.
+- Configure HTTPS for the origin used by the PWA; use a trustworthy certificate and a secure way for Android tablets to reach the host.
+- Provide startup/restart procedures, health checks, OS updates, firewall rules, and backup storage that is not only on the same disk.
+- State limitations plainly: the host must remain powered and reachable; power/network failure interrupts synchronization; it is not off-site disaster recovery by itself.
+
+**Option B — Free cloud evaluation deployment**
+
+Evaluate the current free or trial tiers for a static frontend host, ASP.NET Core API host, and managed PostgreSQL provider. GitHub Pages may suit a static SPA if routing and build constraints are addressed; the API requires a separate compatible runtime host; PostgreSQL requires a separately provisioned database. Verify current provider restrictions, sleep/idle behavior, compute quotas, storage, connection limits, expiration/retention, egress, backups/PITR, TLS, secrets, region/data location, and usage-based charges.
+
+Do not assume that one vendor supports the full .NET API + PostgreSQL + durable file storage stack in a $0 always-on plan. Do not treat free compute or a free database as automatically suitable for production financial data.
+
+**Option C — Low-cost managed production deployment**
+
+Recommend only if no genuine $0 configuration satisfies durability, uptime, backup, security, or operational needs. Give the minimum realistic monthly estimate in PHP and its assumptions. Separate recurring charges from one-time setup, data transfer, storage, domain, and backup costs.
+
+### 5.2 Deployment decision
+
+Recommend one best path for the project's current readiness and distinguish:
+
+- **Development/demo:** synthetic data, no real customer/financial data.
+- **Controlled pilot:** explicit backup procedure, limited users/devices, documented downtime expectations, and tested recovery.
+- **Production:** only after all applicable release gates have been verified; secure identity and tenant isolation, durable storage, monitored backups, tested restore, and operational ownership are mandatory.
+
+Based on the source audit, the safe initial default is an **existing owner-controlled office PC/mini-PC hosting the stack privately for a pilot**, if that hardware already exists, because it avoids dependency on variable free-tier policies. A free cloud combination may be suggested for a disposable demo only after current terms are checked. This is a starting recommendation, not permission to create resources or expose services.
+
+### 5.3 Produce a copyable deployment runbook
+
+Write or update a project document, for example `docs/phase2-deployment-runbook.md`, with:
+
+1. A deployment topology diagram.
+2. The chosen platform and reasons.
+3. Current official references and free-tier constraints checked.
+4. Required accounts, prerequisites, and tools.
+5. Environment variables and secret names (never real secret values).
+6. PostgreSQL provisioning and restricted network configuration.
+7. Migration execution as a deliberate deployment step; do not automatically apply production migrations on every API startup.
+8. API build, publish, and start commands or container instructions.
+9. PWA build and static hosting instructions, including Vite base-path/routing requirements if applicable.
+10. HTTPS, CORS allowed origins, forwarded headers, health/readiness probes, firewall, and secret configuration.
+11. Initial business/device onboarding without committing a shared production registration token.
+12. Backup scheduling, retention, alerting, off-host copy, and a restore rehearsal.
+13. Smoke tests, two-device tests, rollback, and troubleshooting.
+14. How to rotate/revoke a lost tablet's credential.
+15. What costs $0, what has quotas, and what could incur charges.
+
+Where local npm or the .NET SDK is unavailable, prefer a browser-based development workspace or CI workflow to build/test the repository remotely. Do not make cloud deployments dependent on installing npm on the user's laptop.
+
+Do not create actual production cloud resources, expose a public endpoint, purchase a domain, or trigger paid services without explicit user authorization.
+
+---
+
+## 6. RELEASE GATES — STRIKE THROUGH ONLY WHEN VERIFIED
+
+The source audit listed the following release gates. **Resolve them, gather evidence, and then cross out each gate only after it is genuinely completed and verified.** Use Markdown strikethrough syntax `~~...~~` for a gate that passed. Leave unresolved gates unstruck and include a concise blocker/evidence note. Do not cross out all gates merely to satisfy formatting, and do not mark tests passed without running them.
+
+- [ ] Fix and test the v1-to-v2 IndexedDB migration without data loss.
+- [ ] Wire supported repository writes/deletes to atomic durable outbox operations.
+- [ ] Add authorized device/business configuration, sync status, retry, and conflict UI.
+- [ ] Enforce typed, server-side domain validation and financial invariants.
+- [ ] Add PostgreSQL integration tests for retries, conflicts, authorization, idempotency, and concurrent writes.
+- [ ] Apply pulled changes, tombstones/conflicts, and cursor advancement atomically in IndexedDB.
+- [ ] Implement stale-cursor detection and safe full resynchronization.
+- [ ] Implement authorized, integrity-checked attachment synchronization or explicitly exclude attachments from Phase 2 scope with owner approval and clear UI/documentation.
+- [ ] Add dry-run local backup import/migration with conflict reporting and recovery.
+- [ ] Configure encrypted backups, retention, monitoring, off-host copy where feasible, and pass a restore test.
+- [ ] Verify two independent devices/profiles across offline, reconnect, retry, conflict, deletion, and financial idempotency scenarios.
+- [ ] Configure and test production TLS, CORS, secret handling, authentication/authorization, logging/monitoring, and lost-device revocation.
+
+If any item is blocked by a required business decision, missing credential, unavailable provider, or infrastructure limitation, mark it **Blocked** (do not strike through), state what is needed, and continue with nonblocked tasks.
+
+---
+
+## 7. EXECUTION ORDER
+
+Use this order unless the repository evidence reveals a more urgent dependency:
+
+1. Preserve baseline and fix IndexedDB migration.
+2. Wire atomic local mutations + outbox and add regression tests.
+3. Build the sync coordinator, onboarding/configuration, sync status, retry, and conflict workflows.
+4. Harden server domain validation and financial invariants.
+5. Make cursor handling authenticated, pagination-safe, pull application atomic, and stale-cursor recovery complete.
+6. Harden enrollment, device lifecycle, tenant authorization, and API production configuration.
+7. Add server audit trail and attachment sync.
+8. Add local-to-server migration tooling and centralized backup/restore with a successful drill.
+9. Expand CI and run two-device E2E acceptance tests.
+10. Write and validate the deployment runbook; only then assess release readiness.
+
+If this is too much to complete in one execution, **implement the highest-risk fixes first** and continue through as many independent tasks as safely possible. Do not revert to audit-only output. Report exactly what was implemented and what remains.
+
+---
+
+## 8. DEFINITION OF DONE
+
+The task is complete only when:
+
+- Each source finding has a new evidence-based status and linked file/test references.
+- Fixes have been implemented for all unblocked, in-scope findings, not merely recommended.
+- Existing Phase 1 business data and behavior remain preserved.
+- New migrations are safe for existing installations.
+- Local writes and sync outbox entries are atomic for all declared supported entity operations.
+- Push idempotency and server domain rules protect financial integrity.
+- Pull records/tombstones/conflicts and cursors are applied crash-safely.
+- Stale cursors recover without losing pending local edits.
+- Device enrollment, authentication, tenant isolation, token revocation, and production security configuration are tested.
+- Attachments, import, backups, and restore are implemented and verified or have explicitly approved scope exclusions.
+- CI contains meaningful server/database/sync tests and all runnable required checks have actually run.
+- The two-device scenario has passed in an actual automated or manual test run; otherwise production readiness remains **Not Verified**.
+- A deployment comparison and copyable deployment runbook are present.
+- The release-gate checklist crosses out only the gates supported by passing verification evidence.
+- No production resources were created and no paid service was activated without authorization.
+
+---
+
+## 9. FINAL DELIVERY REPORT
+
+At the end, provide:
+
+1. **Executive summary:** actual Phase 2 readiness and the largest remaining risk.
+2. **Finding matrix:** each original and additional issue, status, severity, files changed, tests/evidence, and remaining blocker.
+3. **Implementation summary:** changes made, key design choices, migrations added, and compatibility impacts.
+4. **Verification record:** exact commands, test counts, exit status, and failures. Distinguish local unit tests, PostgreSQL integration tests, browser E2E tests, and manual steps.
+5. **Release gates:** the checklist using the required strike-through rule, with evidence or blockers.
+6. **Deployment recommendation:** selected model, platform rationale, cost assumptions, and free-tier limitations with current official source links and verification date.
+7. **Deployment runbook:** file path and concise launch/rollback/restore summary.
+8. **Security and recovery status:** authentication model, secrets, tenant isolation, backup policy, last restore-test evidence, and known limitations.
+9. **Remaining work:** prioritized P0/P1/P2 issues and required owner decisions.
+10. **Worktree summary:** confirm which files changed and whether any pre-existing user modifications were preserved.
+
+Be factual. If a command cannot run, record why. If two-device verification, restore testing, or real hosting cannot be performed in the current environment, label it unverified rather than complete.
+
+## FINAL DIRECTIVE
+
+Start with a read-only inspection of the current repository and establish a baseline. Then **implement the fixes, tests, and deployment documentation**, prioritizing data preservation, financial integrity, tenant isolation, reliable synchronization, and recoverability. Use the release-gate strike-through only as an evidence-backed completion mark. SentinelOps must not be represented as production-ready for real business data until the critical applicable gates are actually passed.

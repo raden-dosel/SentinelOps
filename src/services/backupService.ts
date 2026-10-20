@@ -340,3 +340,214 @@ export async function getStorageEstimate(): Promise<{ usedBytes: number; quotaBy
   }
   return { usedBytes: 0, quotaBytes: 0, percentage: 0 };
 }
+
+export interface DryRunMigrationReport {
+  valid: boolean;
+  canMerge: boolean;
+  manifest?: BackupManifest;
+  sourceCounts: Record<string, number>;
+  existingCounts: Record<string, number>;
+  duplicateIds: string[];
+  documentNumberCollisions: string[];
+  missingRelations: string[];
+  warnings: string[];
+  recommendation: 'SAFE_TO_MERGE' | 'REQUIRES_REPLACE_CONFIRMATION' | 'INVALID_FILE';
+}
+
+/**
+ * Performs a safe dry-run analysis of a backup against the current local database
+ * without mutating any local data.
+ */
+export async function dryRunBackupMigration(data: BackupData): Promise<DryRunMigrationReport> {
+  const db = await getDatabase();
+  const warnings: string[] = [];
+  const duplicateIds: string[] = [];
+  const documentNumberCollisions: string[] = [];
+  const missingRelations: string[] = [];
+
+  if (!data.manifest || data.manifest.appName !== 'SentinelOps') {
+    return {
+      valid: false,
+      canMerge: false,
+      sourceCounts: {},
+      existingCounts: {},
+      duplicateIds: [],
+      documentNumberCollisions: [],
+      missingRelations: [],
+      warnings: ['Invalid manifest: not a recognized SentinelOps backup file.'],
+      recommendation: 'INVALID_FILE',
+    };
+  }
+
+  // 1. Gather current counts and existing records
+  const [
+    existingClients,
+    existingQuotations,
+    existingInvoices,
+    existingPayments,
+    existingProjects,
+  ] = await Promise.all([
+    db.getAll('clients') as Promise<Client[]>,
+    db.getAll('quotations') as Promise<Quotation[]>,
+    db.getAll('invoices') as Promise<Invoice[]>,
+    db.getAll('payments') as Promise<Payment[]>,
+    db.getAll('projects') as Promise<Project[]>,
+  ]);
+
+  const existingClientIds = new Set(existingClients.map((c) => c.id));
+  const existingQuoteNums = new Map(existingQuotations.map((q) => [q.quotationNumber, q.id]));
+  const existingInvNums = new Map(existingInvoices.map((i) => [i.invoiceNumber, i.id]));
+  const existingPayNums = new Map(existingPayments.map((p) => [p.paymentNumber, p.id]));
+  const existingPrjNums = new Map(existingProjects.map((p) => [p.projectNumber, p.id]));
+
+  const backupClientIds = new Set((data.clients || []).map((c) => c.id));
+  const allClientIds = new Set([...existingClientIds, ...backupClientIds]);
+
+  const backupInvoiceIds = new Set((data.invoices || []).map((i) => i.id));
+  const existingInvoiceIds = new Set(existingInvoices.map((i) => i.id));
+  const allInvoiceIds = new Set([...existingInvoiceIds, ...backupInvoiceIds]);
+
+  // Check Clients
+  for (const client of data.clients || []) {
+    if (existingClientIds.has(client.id)) {
+      duplicateIds.push(`Client:${client.id} (${client.name})`);
+    }
+  }
+
+  // Check Quotations
+  for (const quote of data.quotations || []) {
+    if (!allClientIds.has(quote.clientId)) {
+      missingRelations.push(`Quotation ${quote.quotationNumber} references missing client ID: ${quote.clientId}`);
+    }
+    const existingId = existingQuoteNums.get(quote.quotationNumber);
+    if (existingId && existingId !== quote.id) {
+      documentNumberCollisions.push(`Quotation Number '${quote.quotationNumber}' used by existing ID ${existingId}`);
+    }
+  }
+
+  // Check Invoices
+  for (const inv of data.invoices || []) {
+    if (!allClientIds.has(inv.clientId)) {
+      missingRelations.push(`Invoice ${inv.invoiceNumber} references missing client ID: ${inv.clientId}`);
+    }
+    const existingId = existingInvNums.get(inv.invoiceNumber);
+    if (existingId && existingId !== inv.id) {
+      documentNumberCollisions.push(`Invoice Number '${inv.invoiceNumber}' used by existing ID ${existingId}`);
+    }
+  }
+
+  // Check Payments
+  for (const pay of data.payments || []) {
+    if (!allInvoiceIds.has(pay.invoiceId)) {
+      missingRelations.push(`Payment ${pay.paymentNumber} references missing invoice ID: ${pay.invoiceId}`);
+    }
+    const existingId = existingPayNums.get(pay.paymentNumber);
+    if (existingId && existingId !== pay.id) {
+      documentNumberCollisions.push(`Payment Number '${pay.paymentNumber}' used by existing ID ${existingId}`);
+    }
+  }
+
+  // Check Projects
+  for (const prj of data.projects || []) {
+    if (!allClientIds.has(prj.clientId)) {
+      missingRelations.push(`Project ${prj.projectNumber} references missing client ID: ${prj.clientId}`);
+    }
+    const existingId = existingPrjNums.get(prj.projectNumber);
+    if (existingId && existingId !== prj.id) {
+      documentNumberCollisions.push(`Project Number '${prj.projectNumber}' used by existing ID ${existingId}`);
+    }
+  }
+
+  if (documentNumberCollisions.length > 0) {
+    warnings.push(
+      `Found ${documentNumberCollisions.length} document number collision(s). Merging without caution could cause document numbering discrepancies.`
+    );
+  }
+  if (missingRelations.length > 0) {
+    warnings.push(`Found ${missingRelations.length} dangling relational references in backup payload.`);
+  }
+
+  const canMerge = documentNumberCollisions.length === 0;
+  const recommendation =
+    documentNumberCollisions.length > 0
+      ? 'REQUIRES_REPLACE_CONFIRMATION'
+      : 'SAFE_TO_MERGE';
+
+  return {
+    valid: true,
+    canMerge,
+    manifest: data.manifest,
+    sourceCounts: data.manifest.recordCounts,
+    existingCounts: {
+      clients: existingClients.length,
+      quotations: existingQuotations.length,
+      invoices: existingInvoices.length,
+      payments: existingPayments.length,
+      projects: existingProjects.length,
+    },
+    duplicateIds,
+    documentNumberCollisions,
+    missingRelations,
+    warnings,
+    recommendation,
+  };
+}
+
+/**
+ * Merges backup data into the existing database idempotently without clearing existing records.
+ */
+export async function mergeBackupData(
+  data: BackupData,
+  actorName = 'Admin'
+): Promise<{ addedCount: number; updatedCount: number }> {
+  const db = await getDatabase();
+  const stores = [
+    'clients',
+    'quotations',
+    'quotationRevisions',
+    'invoices',
+    'payments',
+    'projects',
+    'auditEvents',
+  ];
+
+  let addedCount = 0;
+  let updatedCount = 0;
+
+  const tx = db.transaction(stores, 'readwrite');
+
+  // Helper to upsert with count tracking
+  const upsert = async (storeName: string, item: { id: string }) => {
+    const store = tx.objectStore(storeName);
+    const existing = await store.get(item.id);
+    if (existing) {
+      updatedCount++;
+    } else {
+      addedCount++;
+    }
+    await store.put(item);
+  };
+
+  for (const c of data.clients || []) await upsert('clients', c);
+  for (const q of data.quotations || []) await upsert('quotations', q);
+  for (const r of data.quotationRevisions || []) await upsert('quotationRevisions', r);
+  for (const i of data.invoices || []) await upsert('invoices', i);
+  for (const p of data.payments || []) await upsert('payments', p);
+  for (const prj of data.projects || []) await upsert('projects', prj);
+  for (const a of data.auditEvents || []) await upsert('auditEvents', a);
+
+  await tx.done;
+
+  await auditRepository.logEvent({
+    action: 'BACKUP_RESTORE',
+    entityType: 'System',
+    entityId: 'backup_merge',
+    entityLabel: `Merged backup from ${data.manifest.exportedAt}`,
+    actorId: 'admin',
+    actorName,
+    details: { addedCount, updatedCount },
+  });
+
+  return { addedCount, updatedCount };
+}
+

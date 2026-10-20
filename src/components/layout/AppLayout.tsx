@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../../app/providers/AuthContext';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
 import { OfflineIndicator } from '../ui/OfflineIndicator';
+import { SyncStatusWidget } from '../ui/SyncStatusWidget';
 import {
   Shield,
   LayoutDashboard,
@@ -176,6 +177,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
+            <SyncStatusWidget onOpenSyncSettings={() => onSelectTab('settings')} />
             <PWAInstallButton />
 
             <button
