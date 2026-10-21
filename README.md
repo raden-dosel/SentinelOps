@@ -219,26 +219,24 @@ The service worker precaches generated application assets, the manifest, and loc
 
 ---
 
-## 8. Future Backend & Synchronization Roadmap (Phase 2)
+## 8. Multi-Tablet Backend & Synchronization (Phase 2 Implemented)
 
-SentinelOps is architected with clear repository boundaries (`src/storage/repositories.ts`) to prepare for future server synchronization:
+SentinelOps includes an enterprise-grade, offline-first synchronization subsystem connecting multiple Android field tablets to an ASP.NET Core Web API with PostgreSQL:
 
 ```text
-[Current Phase 1 Architecture]
-React PWA  ──>  Repository Layer  ──>  IndexedDB (Local Device)
-
-[Future Phase 2 Architecture]
-React PWA  ──>  Repository Layer  ──>  Sync Engine / HTTP Client
-                                              │
-                                              ▼
-                                      ASP.NET Core Web API
-                                              │
-                                              ▼
-                                      PostgreSQL Database
+[Multi-Tablet Phase 2 Architecture]
+Tablet 1 (PWA) ──> Atomic Outbox ──┐
+Tablet 2 (PWA) ──> Atomic Outbox ──┼─> Sync Coordinator ──> ASP.NET Core API ──> PostgreSQL 16
+Tablet 3 (PWA) ──> Atomic Outbox ──┘   (HMAC Cursors,           (Domain Validation,    (Monotonic Change
+                                       Crash-Safe Pulls)        Financial Invariants)   Feed, Audit Log)
 ```
 
-Prepared extensions:
-- All domain records utilize stable UUIDs (`crypto.randomUUID()`).
-- Document sequences (`Q-2026-001`, `INV-2026-001`) use isolated sequence tracking.
-- Timestamps are normalized in ISO 8601 UTC.
-- All monetary math is standardized in integer centavos.
+Implemented capabilities:
+- **Atomic Local Mutations & Durable Outbox:** Every client, quotation, revision, invoice, payment, project, and attachment write commits its entity record and outbox operation in a single IndexedDB transaction.
+- **HMAC Authenticated Cursors:** Sync cursors are signed with HMAC-SHA256, protecting against sequence tampering and cross-business leakage.
+- **Push Idempotency & Financial Invariants:** Duplicate payment operations return `already_applied` without double-deduction. Invoices maintain `remainingBalance = grandTotal - paidAmount`.
+- **Full Resync & Stale-Cursor Recovery:** If a cursor expires, full snapshot recovery applies remote state while preserving unpushed local outbox edits.
+- **Device Credential Revocation:** Immediate lost-device revocation via `POST /api/v1/devices/{id}/revoke`.
+- **Dry-Run Backup Migration:** Automated analysis of `.json` and `.zip` backups with relationship audits, numbering collision detection, and safe non-destructive merge.
+- **Complete Deployment Runbook:** Refer to `docs/phase2-deployment-runbook.md` for production topologies, $0 office host setups, security hardening, and backup automation.
+

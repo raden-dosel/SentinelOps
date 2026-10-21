@@ -4,16 +4,23 @@ import {
   settingsRepository,
   auditRepository,
   userRepository,
+  syncConfigRepository,
+  syncConflictRepository,
+  syncOutboxRepository,
 } from '../../storage/repositories';
-import { clearAllDatabaseData } from '../../storage/database';
+import { clearAllDatabaseData, SyncConfig, SyncConflictRecord } from '../../storage/database';
 import {
   exportJsonBackup,
   exportZipBackup,
   validateBackupFile,
   restoreBackupData,
+  dryRunBackupMigration,
+  mergeBackupData,
   getStorageEstimate,
   RestorePreview,
+  DryRunMigrationReport,
 } from '../../services/backupService';
+import { syncCoordinator, SyncCoordinatorState } from '../../services/syncCoordinator';
 import { hashPassword, generateSalt } from '../../services/security';
 import { useAuth } from '../../app/providers/AuthContext';
 import { useToast } from '../../app/providers/ToastContext';
@@ -35,6 +42,13 @@ import {
   AlertTriangle,
   RefreshCw,
   KeyRound,
+  Cloud,
+  CloudOff,
+  Smartphone,
+  ShieldCheck,
+  Check,
+  Radio,
+  FileText,
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
@@ -42,13 +56,25 @@ export const SettingsView: React.FC = () => {
   const { showToast } = useToast();
 
   const [activeSection, setActiveSection] = useState<
-    'business' | 'tax' | 'quotation' | 'numbering' | 'security' | 'backup' | 'audit'
+    'business' | 'tax' | 'quotation' | 'numbering' | 'security' | 'backup' | 'audit' | 'sync'
   >('business');
 
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [auditFilter, setAuditFilter] = useState('');
   const [loading, setLoading] = useState(true);
+
+  // Sync state
+  const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
+  const [syncState, setSyncState] = useState<SyncCoordinatorState>(syncCoordinator.getState());
+  const [conflicts, setConflicts] = useState<SyncConflictRecord[]>([]);
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [isEnrolling, setIsEnrolling] = useState(false);
+  const [enrollServerUrl, setEnrollServerUrl] = useState('http://localhost:5000');
+  const [enrollDeviceName, setEnrollDeviceName] = useState('Operations Tablet 1');
+  const [enrollBusinessName, setEnrollBusinessName] = useState('Sentinel Security PH');
+  const [enrollRegToken, setEnrollRegToken] = useState('');
+  const [isDisconnectDialogOpen, setIsDisconnectDialogOpen] = useState(false);
 
   // Storage estimation
   const [storageUsage, setStorageUsage] = useState<{ usedBytes: number; quotaBytes: number; percentage: number }>({
@@ -64,10 +90,13 @@ export const SettingsView: React.FC = () => {
   const [passwordChangeError, setPasswordChangeError] = useState('');
   const [passwordChangeSuccess, setPasswordChangeSuccess] = useState('');
 
-  // Backup restore state
+  // Backup restore & dry run state
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
   const [restorePreview, setRestorePreview] = useState<RestorePreview | null>(null);
+  const [dryRunReport, setDryRunReport] = useState<DryRunMigrationReport | null>(null);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [isDryRunning, setIsDryRunning] = useState(false);
+  const [isMerging, setIsMerging] = useState(false);
 
   // Clear data confirm
   const [isWipeDialogOpen, setIsWipeDialogOpen] = useState(false);
@@ -75,14 +104,21 @@ export const SettingsView: React.FC = () => {
   const loadAll = async () => {
     try {
       setLoading(true);
-      const [currSettings, events, storage] = await Promise.all([
+      const [currSettings, events, storage, cfg, confl] = await Promise.all([
         settingsRepository.getSettings(),
         auditRepository.getAll(),
         getStorageEstimate(),
+        syncConfigRepository.getConfig(),
+        syncConflictRepository.getAll(),
       ]);
       setSettings(currSettings);
       setAuditEvents(events);
       setStorageUsage(storage);
+      setSyncConfig(cfg);
+      setConflicts(confl);
+      if (currSettings?.businessName && !cfg) {
+        setEnrollBusinessName(currSettings.businessName);
+      }
     } catch (e) {
       console.error(e);
       showToast('Failed to load settings', 'error');
@@ -93,7 +129,91 @@ export const SettingsView: React.FC = () => {
 
   useEffect(() => {
     loadAll();
+    const unsub = syncCoordinator.subscribe((state) => {
+      setSyncState(state);
+    });
+    return unsub;
   }, []);
+
+  const handleEnrollDevice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!enrollServerUrl.trim() || !enrollDeviceName.trim()) {
+      showToast('Please provide server URL and device name', 'error');
+      return;
+    }
+    try {
+      setIsEnrolling(true);
+      const cfg = await syncCoordinator.enrollDevice({
+        apiBaseUrl: enrollServerUrl.trim(),
+        deviceName: enrollDeviceName.trim(),
+        businessName: enrollBusinessName.trim() || settings?.businessName || 'SentinelOps Business',
+        registrationToken: enrollRegToken.trim(),
+      });
+      setSyncConfig(cfg);
+      showToast('Tablet enrolled successfully! Synchronizing initial dataset...', 'success');
+      await loadAll();
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Enrollment failed', 'error');
+    } finally {
+      setIsEnrolling(false);
+    }
+  };
+
+  const handleDisconnectDevice = async () => {
+    try {
+      await syncCoordinator.disconnectDevice();
+      setSyncConfig(null);
+      setIsDisconnectDialogOpen(false);
+      showToast('Device unlinked from cloud sync. Local records preserved.', 'info');
+      await loadAll();
+    } catch {
+      showToast('Failed to unlink device', 'error');
+    }
+  };
+
+  const handleManualSync = async () => {
+    try {
+      setIsManualSyncing(true);
+      const success = await syncCoordinator.triggerSync();
+      if (success) {
+        showToast('Synchronization completed successfully!', 'success');
+      } else {
+        showToast('Sync completed with warnings or error. Check status badge.', 'info');
+      }
+      const [cfg, confl] = await Promise.all([
+        syncConfigRepository.getConfig(),
+        syncConflictRepository.getAll(),
+      ]);
+      setSyncConfig(cfg);
+      setConflicts(confl);
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Manual sync failed', 'error');
+    } finally {
+      setIsManualSyncing(false);
+    }
+  };
+
+  const handleResolveConflict = async (operationId: string) => {
+    try {
+      await syncConflictRepository.resolveConflict(operationId);
+      const confl = await syncConflictRepository.getAll();
+      setConflicts(confl);
+      showToast('Conflict dismissed. Authoritative server revision retained.', 'success');
+    } catch {
+      showToast('Failed to resolve conflict', 'error');
+    }
+  };
+
+  const handleToggleAutoSync = async () => {
+    if (!syncConfig) return;
+    const updated: SyncConfig = {
+      ...syncConfig,
+      autoSync: !syncConfig.autoSync,
+    };
+    await syncConfigRepository.saveConfig(updated);
+    setSyncConfig(updated);
+    showToast(`Auto-sync ${updated.autoSync ? 'enabled' : 'disabled'}`, 'info');
+  };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -165,8 +285,21 @@ export const SettingsView: React.FC = () => {
     if (!file) return;
 
     setRestoreFile(file);
+    setDryRunReport(null);
     const preview = await validateBackupFile(file);
     setRestorePreview(preview);
+
+    if (preview.valid && preview.previewData) {
+      try {
+        setIsDryRunning(true);
+        const report = await dryRunBackupMigration(preview.previewData);
+        setDryRunReport(report);
+      } catch (err: unknown) {
+        console.error('Dry run failed', err);
+      } finally {
+        setIsDryRunning(false);
+      }
+    }
   };
 
   const handleExecuteRestore = async () => {
@@ -178,11 +311,30 @@ export const SettingsView: React.FC = () => {
       showToast('Database restored successfully from backup!', 'success');
       setRestorePreview(null);
       setRestoreFile(null);
+      setDryRunReport(null);
       await loadAll();
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Restore failed', 'error');
     } finally {
       setIsRestoring(false);
+    }
+  };
+
+  const handleExecuteMerge = async () => {
+    if (!restorePreview || !restorePreview.previewData) return;
+
+    try {
+      setIsMerging(true);
+      const { addedCount, updatedCount } = await mergeBackupData(restorePreview.previewData, session?.fullName || 'Admin');
+      showToast(`Merged ${addedCount} new records and updated ${updatedCount} existing records without data loss.`, 'success');
+      setRestorePreview(null);
+      setRestoreFile(null);
+      setDryRunReport(null);
+      await loadAll();
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Merge failed', 'error');
+    } finally {
+      setIsMerging(false);
     }
   };
 
@@ -288,6 +440,21 @@ export const SettingsView: React.FC = () => {
         >
           <History className="w-4 h-4" />
           <span>Audit Log ({auditEvents.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSection('sync')}
+          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap transition ${
+            activeSection === 'sync'
+              ? 'bg-blue-600 text-white shadow-md'
+              : 'text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+        >
+          <Cloud className="w-4 h-4" />
+          <span>Sync & Multi-Tablet</span>
+          {conflicts.length > 0 && (
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+          )}
         </button>
       </div>
 
@@ -766,7 +933,7 @@ export const SettingsView: React.FC = () => {
                   <>
                     <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold">
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Valid SentinelOps Backup File Verified</span>
+                      <span>Valid SentinelOps Backup File Verified (Schema v{restorePreview.manifest.schemaVersion})</span>
                     </div>
 
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
@@ -784,18 +951,81 @@ export const SettingsView: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-3 pt-2">
+                    {/* Dry Run Analysis Report */}
+                    {isDryRunning && (
+                      <p className="text-xs text-blue-400 animate-pulse">Running pre-migration dry-run analysis...</p>
+                    )}
+
+                    {dryRunReport && (
+                      <div className="p-3 rounded-lg bg-slate-900/90 border border-slate-800 space-y-2 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-200">Dry-Run Migration Audit:</span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              dryRunReport.recommendation === 'SAFE_TO_MERGE'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                            }`}
+                          >
+                            {dryRunReport.recommendation === 'SAFE_TO_MERGE'
+                              ? '✓ Non-Destructive Merge Safe'
+                              : '⚠ Review Conflicts Before Merge'}
+                          </span>
+                        </div>
+
+                        {dryRunReport.duplicateIds.length > 0 && (
+                          <p className="text-[11px] text-slate-400">
+                            • Existing records to be updated: <strong>{dryRunReport.duplicateIds.length}</strong>
+                          </p>
+                        )}
+
+                        {dryRunReport.documentNumberCollisions.length > 0 && (
+                          <div className="p-2 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[11px] space-y-1">
+                            <span className="font-bold">Numbering Collisions:</span>
+                            {dryRunReport.documentNumberCollisions.slice(0, 3).map((col, idx) => (
+                              <div key={idx}>• {col}</div>
+                            ))}
+                            {dryRunReport.documentNumberCollisions.length > 3 && (
+                              <div>+ {dryRunReport.documentNumberCollisions.length - 3} more...</div>
+                            )}
+                          </div>
+                        )}
+
+                        {dryRunReport.missingRelations.length > 0 && (
+                          <div className="p-2 rounded bg-rose-500/10 border border-rose-500/30 text-rose-300 text-[11px] space-y-1">
+                            <span className="font-bold">Relational Integrity Warnings:</span>
+                            {dryRunReport.missingRelations.slice(0, 2).map((rel, idx) => (
+                              <div key={idx}>• {rel}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-3 pt-2">
+                      <button
+                        onClick={handleExecuteMerge}
+                        disabled={isMerging || isRestoring}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-md disabled:opacity-50"
+                        title="Merge backup records into existing local database without deleting current records"
+                      >
+                        {isMerging ? 'Merging Records...' : 'Safe Merge (Preserve Local)'}
+                      </button>
+
                       <button
                         onClick={handleExecuteRestore}
-                        disabled={isRestoring}
-                        className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-xs font-bold text-white shadow-md"
+                        disabled={isRestoring || isMerging}
+                        className="px-4 py-2 rounded-xl bg-purple-600/90 hover:bg-purple-600 text-xs font-bold text-white shadow-md disabled:opacity-50"
+                        title="Replace all local records with backup archive"
                       >
-                        {isRestoring ? 'Restoring Data...' : 'Confirm & Restore Records'}
+                        {isRestoring ? 'Replacing Data...' : 'Full Restore (Clean Replace)'}
                       </button>
+
                       <button
                         onClick={() => {
                           setRestorePreview(null);
                           setRestoreFile(null);
+                          setDryRunReport(null);
                         }}
                         className="text-xs text-slate-400 hover:text-white"
                       >
@@ -881,6 +1111,274 @@ export const SettingsView: React.FC = () => {
             )}
           </div>
         </div>
+      )}
+
+      {/* 7. Sync & Multi-Tablet Subsystem Section */}
+      {activeSection === 'sync' && (
+        <div className="space-y-6">
+          {/* Header Description */}
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
+            <h3 className="text-base font-bold text-white flex items-center gap-2">
+              <Cloud className="w-5 h-5 text-blue-400" />
+              <span>Multi-Tablet Synchronization & Central Server</span>
+            </h3>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              SentinelOps is designed offline-first. All client inquiries, quotes, issued invoices, and progress photos are stored instantly in local IndexedDB. When connected to your centralized SentinelOps ASP.NET Core & PostgreSQL server, the sync coordinator automatically pushes outbox batches and pulls remote team changes.
+            </p>
+          </div>
+
+          {/* Sync Status & Active Device Overview */}
+          {syncConfig ? (
+            <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                      syncState.status === 'Synced'
+                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                        : syncState.status === 'Syncing'
+                        ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                        : syncState.status === 'Conflict'
+                        ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                        : syncState.status === 'Offline'
+                        ? 'bg-slate-800 text-slate-400 border border-slate-700'
+                        : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                    }`}
+                  >
+                    {syncState.status === 'Offline' ? (
+                      <CloudOff className="w-5 h-5" />
+                    ) : syncState.status === 'Syncing' ? (
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <Cloud className="w-5 h-5" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-white text-sm sm:text-base">
+                        Status: {syncState.status}
+                      </span>
+                      {syncConfig.autoSync && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
+                          Auto-Sync Active
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {syncState.lastSuccessfulSyncAt
+                        ? `Last synchronized: ${new Date(syncState.lastSuccessfulSyncAt).toLocaleString()}`
+                        : 'No successful sync yet.'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleManualSync}
+                    disabled={isManualSyncing || !syncState.isOnline}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-bold text-white shadow-md shadow-blue-600/30 transition"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isManualSyncing ? 'animate-spin' : ''}`} />
+                    <span>{isManualSyncing ? 'Syncing...' : 'Sync Now'}</span>
+                  </button>
+
+                  <button
+                    onClick={handleToggleAutoSync}
+                    className={`px-3 py-2 rounded-xl text-xs font-bold border transition ${
+                      syncConfig.autoSync
+                        ? 'border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        : 'border-blue-500/40 bg-blue-500/10 text-blue-300'
+                    }`}
+                  >
+                    {syncConfig.autoSync ? 'Pause Auto' : 'Enable Auto'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Identity & Metadata Details */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+                <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                  <span className="text-[11px] text-slate-400 block mb-1">Business Organization</span>
+                  <span className="font-bold text-white text-sm">{syncConfig.businessName}</span>
+                  <span className="block text-[10px] text-slate-500 truncate mt-0.5" title={syncConfig.businessId}>
+                    ID: {syncConfig.businessId}
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                  <span className="text-[11px] text-slate-400 block mb-1">Device Name</span>
+                  <span className="font-bold text-white text-sm">{syncConfig.deviceName}</span>
+                  <span className="block text-[10px] text-slate-500 truncate mt-0.5" title={syncConfig.deviceId}>
+                    Device ID: {syncConfig.deviceId}
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                  <span className="text-[11px] text-slate-400 block mb-1">Server Endpoint</span>
+                  <span className="font-bold text-white text-xs truncate block">{syncConfig.apiBaseUrl}</span>
+                  <span className="block text-[10px] text-emerald-400 mt-0.5">TLS / API v1</span>
+                </div>
+
+                <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                  <span className="text-[11px] text-slate-400 block mb-1">Durable Outbox Queue</span>
+                  <span className="font-bold text-white text-sm">{syncState.pendingCount} Pending</span>
+                  <span className="block text-[10px] text-slate-500 mt-0.5">
+                    {syncState.pendingCount === 0 ? 'All local mutations pushed' : 'Awaiting server push'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Disconnect Action */}
+              <div className="pt-2 flex justify-end">
+                <button
+                  onClick={() => setIsDisconnectDialogOpen(true)}
+                  className="text-xs text-rose-400 hover:text-rose-300 font-semibold transition"
+                >
+                  Unlink Tablet from Server...
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* Enrollment Form */
+            <form onSubmit={handleEnrollDevice} className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+              <div className="flex items-center gap-2">
+                <Smartphone className="w-5 h-5 text-blue-400" />
+                <h4 className="text-sm font-bold text-white">Enroll This Device to SentinelOps Central Server</h4>
+              </div>
+              <p className="text-xs text-slate-400">
+                Enter your SentinelOps Web API endpoint and registration credentials to securely pair this tablet.
+              </p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Central API Base URL *
+                  </label>
+                  <input
+                    type="url"
+                    required
+                    value={enrollServerUrl}
+                    onChange={(e) => setEnrollServerUrl(e.target.value)}
+                    placeholder="https://sentinelops-api.yourcompany.com or http://192.168.1.100:5000"
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white placeholder-slate-500"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    For private office LAN setups, enter your local host IP/port. For cloud setups, enter your HTTPS API domain.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Business / Company Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={enrollBusinessName}
+                    onChange={(e) => setEnrollBusinessName(e.target.value)}
+                    placeholder="e.g. Sentinel Security PH"
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Tablet / Device Label *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={enrollDeviceName}
+                    onChange={(e) => setEnrollDeviceName(e.target.value)}
+                    placeholder="e.g. Operations Tablet 1 (Pasig)"
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Device Registration / Invitation Key *
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={enrollRegToken}
+                    onChange={(e) => setEnrollRegToken(e.target.value)}
+                    placeholder="Enter registration token issued by administrator"
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white placeholder-slate-500"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Matches the server's <code>Sync:RegistrationToken</code> configuration.
+                  </p>
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-end">
+                <button
+                  type="submit"
+                  disabled={isEnrolling}
+                  className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 font-bold text-xs text-white shadow-md shadow-blue-600/30 transition flex items-center gap-2"
+                >
+                  {isEnrolling && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                  <span>{isEnrolling ? 'Enrolling Tablet...' : 'Connect & Enroll Tablet'}</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Sync Conflict Resolution Panel */}
+          {conflicts.length > 0 && (
+            <div className="p-6 rounded-2xl bg-amber-950/20 border border-amber-900/50 space-y-4">
+              <div className="flex items-center gap-2 text-amber-400">
+                <AlertTriangle className="w-5 h-5" />
+                <h4 className="text-sm font-bold">Concurrent Sync Conflicts Detected ({conflicts.length})</h4>
+              </div>
+              <p className="text-xs text-slate-400">
+                The records below were modified on another tablet while offline. The authoritative server revision was applied locally. You can inspect the local changes and dismiss the conflict warning.
+              </p>
+
+              <div className="space-y-3">
+                {conflicts.map((confl) => (
+                  <div
+                    key={confl.operationId}
+                    className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-2 text-xs"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-white">
+                        {confl.entityType} ({confl.entityId.slice(0, 8)}...)
+                      </span>
+                      <span className="text-[10px] text-slate-500">
+                        {new Date(confl.occurredAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <p className="text-slate-300">{confl.message}</p>
+                    <div className="flex justify-end pt-1">
+                      <button
+                        onClick={() => handleResolveConflict(confl.operationId)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700"
+                      >
+                        Dismiss & Keep Server Version
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Disconnect Device Confirmation Dialog */}
+      {isDisconnectDialogOpen && (
+        <ConfirmDialog
+          isOpen={isDisconnectDialogOpen}
+          onClose={() => setIsDisconnectDialogOpen(false)}
+          onConfirm={handleDisconnectDevice}
+          title="Unlink Tablet from Server Sync"
+          message="Are you sure you want to disconnect this device from cloud sync? All clients, quotes, invoices, and photos currently stored on this tablet will remain intact and usable offline."
+          confirmLabel="Unlink Device"
+          variant="warning"
+        />
       )}
 
       {/* Wipe Confirmation Dialog */}
