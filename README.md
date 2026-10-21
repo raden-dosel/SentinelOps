@@ -117,12 +117,19 @@ dotnet ef database update --project server/SentinelOps.Api --startup-project ser
 dotnet run --project server/SentinelOps.Api
 ```
 
-Configure `ConnectionStrings__SentinelOps`, `Sync__RegistrationToken`, and explicit
-`Cors__AllowedOrigins` values outside development. Register a device through
+Configure `ConnectionStrings__SentinelOps`, `Sync__RegistrationToken`,
+`Sync__CursorSigningKey`, and explicit `Cors__AllowedOrigins` values outside
+development. Register a device through
 `POST /api/v1/devices/register` using the registration token, then use the returned
 device token as a bearer token for `/api/v1/sync/push` and `/api/v1/sync/changes`.
 The device token is only returned at registration time and is stored server-side as
 a SHA-256 hash. Do not use the development token in a deployed environment.
+
+The current API sync slice accepts only `Client`, `Project`, `ProjectProgressNote`,
+and `Settings` payloads. Invoices, payments, quotations, revisions, attachments,
+and audit events remain local-only until typed server validation and transaction
+tests are implemented. See the [Phase 2 readiness audit](docs/phase2-api-database-readiness-audit.md)
+and [deployment runbook](docs/phase2-deployment-runbook.md) before using business data.
 
 ### PWA Verification
 

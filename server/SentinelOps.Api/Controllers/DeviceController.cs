@@ -18,10 +18,11 @@ public sealed class DeviceController(SentinelOpsDbContext db, IConfiguration con
         RegisterDeviceRequest request, CancellationToken cancellationToken)
     {
         var expected = configuration["Sync:RegistrationToken"];
+        var presented = Request.Headers["X-Registration-Token"].ToString();
         if (string.IsNullOrWhiteSpace(expected) ||
             !CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(expected),
-                Encoding.UTF8.GetBytes(Request.Headers["X-Registration-Token"].ToString())))
+                SHA256.HashData(Encoding.UTF8.GetBytes(expected)),
+                SHA256.HashData(Encoding.UTF8.GetBytes(presented))))
             return Unauthorized();
         if (string.IsNullOrWhiteSpace(request.DeviceName) || request.DeviceName.Length > 200)
             return Problem(statusCode: 400, title: "Device name is invalid.");

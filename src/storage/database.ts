@@ -67,6 +67,8 @@ export async function getDatabase(): Promise<IDBPDatabase> {
           const userStore = db.createObjectStore('users', { keyPath: 'id' });
           userStore.createIndex('username', 'username', { unique: true });
         }
+        }
+
         if (oldVersion < 2) {
           if (!db.objectStoreNames.contains('syncOutbox')) {
             const outbox = db.createObjectStore('syncOutbox', { keyPath: 'operationId' });
@@ -161,7 +163,6 @@ export async function getDatabase(): Promise<IDBPDatabase> {
           auditStore.createIndex('entityType', 'entityType', { unique: false });
           auditStore.createIndex('entityId', 'entityId', { unique: false });
         }
-      }
     },
   });
 }

@@ -14,13 +14,16 @@ namespace SentinelOps.Api.Controllers;
 [ApiController]
 [Route("api/v1/sync")]
 [EnableRateLimiting("sync")]
-public sealed class SyncController(SentinelOpsDbContext db) : ControllerBase
+public sealed class SyncController(SentinelOpsDbContext db, IConfiguration configuration) : ControllerBase
 {
     private const int MaxBatchSize = 100;
     private const int MaxPayloadBytes = 512 * 1024;
     private static readonly HashSet<string> AllowedEntityTypes =
-        ["Client", "Quotation", "QuotationRevision", "Invoice", "Payment", "Project",
-            "ProjectProgressNote", "Attachment", "AuditEvent", "Settings"];
+        ["Client", "Project", "ProjectProgressNote", "Settings"];
+    private string CursorSigningKey =>
+        !string.IsNullOrWhiteSpace(configuration["Sync:CursorSigningKey"])
+            ? configuration["Sync:CursorSigningKey"]!
+            : throw new InvalidOperationException("Sync:CursorSigningKey must be configured.");
 
     [HttpPost("push")]
     public async Task<ActionResult<PushResponse>> Push(PushRequest request, CancellationToken cancellationToken)
@@ -163,9 +166,11 @@ public sealed class SyncController(SentinelOpsDbContext db) : ControllerBase
 
         var sequence = 0L;
         if (!string.IsNullOrWhiteSpace(cursor) &&
-            (!CursorCodec.TryDecode(cursor, out var decoded) || decoded!.BusinessId != identity.Value.BusinessId))
+            (!CursorCodec.TryDecode(cursor, CursorSigningKey, out var decoded) ||
+             decoded!.BusinessId != identity.Value.BusinessId))
             return Problem(statusCode: 400, title: "Cursor is invalid or belongs to another business.");
-        if (CursorCodec.TryDecode(cursor, out var decodedCursor)) sequence = decodedCursor!.Sequence;
+        if (CursorCodec.TryDecode(cursor, CursorSigningKey, out var decodedCursor))
+            sequence = decodedCursor!.Sequence;
 
         var changes = await db.ChangeFeedEntries.AsNoTracking()
             .Where(x => x.BusinessId == identity.Value.BusinessId && x.Sequence > sequence)
@@ -174,7 +179,7 @@ public sealed class SyncController(SentinelOpsDbContext db) : ControllerBase
         return Ok(new ChangesResponse(changes.Select(x => new ChangeDto(
             x.Sequence, x.EntityType, x.EntityId, x.Operation, x.Revision,
             x.Operation == "delete" ? null : JsonSerializer.Deserialize<JsonElement>(x.PayloadJson),
-            x.CreatedAtUtc)).ToList(), CursorCodec.Encode(new(identity.Value.BusinessId, next))));
+            x.CreatedAtUtc)).ToList(), CursorCodec.Encode(new(identity.Value.BusinessId, next), CursorSigningKey)));
     }
 
     private async Task<(Guid BusinessId, Guid DeviceId)?> AuthenticateAsync(Guid deviceId, CancellationToken cancellationToken)
