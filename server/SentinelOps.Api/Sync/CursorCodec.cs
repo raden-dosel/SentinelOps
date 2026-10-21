@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Security.Cryptography;
 
 namespace SentinelOps.Api.Sync;
 
@@ -10,6 +9,9 @@ public sealed record SyncCursor(Guid BusinessId, long Sequence);
 public static class CursorCodec
 {
     private static readonly byte[] DefaultHmacKey = "SentinelOps_Authenticated_Cursor_Key_v1"u8.ToArray();
+
+    public static string Encode(SyncCursor cursor, string signingKey) =>
+        Encode(cursor, Encoding.UTF8.GetBytes(signingKey));
 
     public static string Encode(SyncCursor cursor, byte[]? hmacKey = null)
     {
@@ -27,6 +29,9 @@ public static class CursorCodec
             .TrimEnd('=');
         return $"{base64Payload}.{base64Sig}";
     }
+
+    public static bool TryDecode(string? encoded, string signingKey, out SyncCursor? cursor) =>
+        TryDecode(encoded, out cursor, Encoding.UTF8.GetBytes(signingKey));
 
     public static bool TryDecode(string? encoded, out SyncCursor? cursor, byte[]? hmacKey = null)
     {
@@ -59,10 +64,6 @@ public static class CursorCodec
                     return false; // Tampered or forged cursor rejected!
                 }
             }
-            else if (parts.Length == 1)
-            {
-                payloadPart = parts[0];
-            }
             else
             {
                 return false;
@@ -84,10 +85,4 @@ public static class CursorCodec
         }
     }
 
-    private static string Sign(string payload, string signingKey) =>
-        Convert.ToBase64String(HMACSHA256.HashData(
-            Encoding.UTF8.GetBytes(signingKey), Encoding.UTF8.GetBytes(payload)))
-            .Replace('+', '-')
-            .Replace('/', '_')
-            .TrimEnd('=');
 }

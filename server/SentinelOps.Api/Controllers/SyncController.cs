@@ -21,6 +21,10 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
     private static readonly HashSet<string> AllowedEntityTypes =
         ["Client", "Quotation", "QuotationRevision", "Invoice", "Payment", "Project",
             "ProjectProgressNote", "Attachment", "AuditEvent", "Settings"];
+    private string CursorSigningKey =>
+        !string.IsNullOrWhiteSpace(configuration["Sync:CursorSigningKey"])
+            ? configuration["Sync:CursorSigningKey"]!
+            : throw new InvalidOperationException("Sync:CursorSigningKey must be configured.");
 
     private static readonly HashSet<string> AllowedLeadStatuses =
         ["New Inquiry", "Contacted", "Site Visit Scheduled", "Site Visit Completed",
@@ -191,7 +195,8 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
         var sequence = 0L;
         if (!string.IsNullOrWhiteSpace(cursor))
         {
-            if (!CursorCodec.TryDecode(cursor, out var decoded) || decoded!.BusinessId != identity.Value.BusinessId)
+            if (!CursorCodec.TryDecode(cursor, CursorSigningKey, out var decoded) ||
+                decoded!.BusinessId != identity.Value.BusinessId)
             {
                 return Problem(statusCode: 400, title: "Cursor is invalid, forged, or belongs to another business.");
             }
@@ -205,7 +210,8 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
         return Ok(new ChangesResponse(changes.Select(x => new ChangeDto(
             x.Sequence, x.EntityType, x.EntityId, x.Operation, x.Revision,
             x.Operation == "delete" ? null : JsonSerializer.Deserialize<JsonElement>(x.PayloadJson),
-            x.CreatedAtUtc)).ToList(), CursorCodec.Encode(new(identity.Value.BusinessId, next))));
+            x.CreatedAtUtc)).ToList(),
+            CursorCodec.Encode(new(identity.Value.BusinessId, next), CursorSigningKey)));
     }
 
     [HttpGet("snapshot")]
@@ -226,7 +232,7 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
             .Where(x => x.BusinessId == identity.Value.BusinessId)
             .MaxAsync(x => (long?)x.Sequence, cancellationToken) ?? 0L;
 
-        var snapshotCursor = CursorCodec.Encode(new(identity.Value.BusinessId, maxSeq));
+        var snapshotCursor = CursorCodec.Encode(new(identity.Value.BusinessId, maxSeq), CursorSigningKey);
 
         return Ok(new SnapshotResponse(
             entities.Select(x => new SnapshotEntityDto(
