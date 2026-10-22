@@ -4,8 +4,83 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: Run Neon migrations, integration tests, and deploy the API to Render
+        required: true
+        default: false
+        type: boolean
 
 jobs:
+  production:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_production
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore API dependencies
+        run: dotnet restore server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj
+
+      - name: Install EF Core CLI
+        run: dotnet tool install --global dotnet-ef --version 10.0.1
+
+      - name: Build API and tests
+        run: dotnet build server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --no-restore
+
+      - name: Apply migrations to Neon
+        run: >
+          dotnet ef database update
+          --project server/SentinelOps.Api/SentinelOps.Api.csproj
+          --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
+        env:
+          ConnectionStrings__SentinelOps: ${{ secrets.NEON_CONNECTION_STRING }}
+
+      - name: Verify Neon integration
+        run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --no-build --filter "Category=NeonIntegration"
+        env:
+          ConnectionStrings__SentinelOps: ${{ secrets.NEON_CONNECTION_STRING }}
+
+      - name: Validate required Render deployment secrets
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_API_HEALTH_URL: ${{ secrets.RENDER_API_HEALTH_URL }}
+        run: |
+          test -n "$RENDER_DEPLOY_HOOK_URL" || {
+            echo "::error::RENDER_DEPLOY_HOOK_URL is not configured in the production environment."
+            exit 1
+          }
+          test -n "$RENDER_API_HEALTH_URL" || {
+            echo "::error::RENDER_API_HEALTH_URL is not configured in the production environment."
+            exit 1
+          }
+
+      - name: Trigger Render API deployment
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: curl --fail-with-body --silent --show-error --request POST "$RENDER_DEPLOY_HOOK_URL"
+
+      - name: Wait for Render API readiness
+        env:
+          RENDER_API_HEALTH_URL: ${{ secrets.RENDER_API_HEALTH_URL }}
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error "$RENDER_API_HEALTH_URL"; then
+              echo "Render API is ready."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Render API did not become ready within 5 minutes."
+          exit 1
+
   frontend:
     runs-on: ubuntu-latest
     steps:
@@ -43,7 +118,7 @@ jobs:
       - run: dotnet restore server/SentinelOps.Api/SentinelOps.Api.csproj
       - run: dotnet tool install --global dotnet-ef --version 10.0.1
       - run: dotnet build server/SentinelOps.Api/SentinelOps.Api.csproj --no-restore
-      - run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj
+      - run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --filter "Category!=NeonIntegration"
       - run: dotnet ef database update --project server/SentinelOps.Api/SentinelOps.Api.csproj --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
         env:
           ConnectionStrings__SentinelOps: Host=localhost;Port=5432;Database=sentinelops;Username=sentinelops;Password=development-only

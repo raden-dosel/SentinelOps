@@ -131,6 +131,24 @@ and audit events remain local-only until typed server validation and transaction
 tests are implemented. See the [Phase 2 readiness audit](docs/phase2-api-database-readiness-audit.md)
 and [deployment runbook](docs/phase2-deployment-runbook.md) before using business data.
 
+### Production workflow
+
+The `production` job in `.github/workflows/ci.yml` is manual and runs only when
+the `deploy_production` input is enabled. Configure these secrets in the
+repository's `production` GitHub environment:
+
+- `NEON_CONNECTION_STRING`: Neon connection string used for EF migrations and
+  the Neon integration test.
+- `RENDER_DEPLOY_HOOK_URL`: Render service deploy-hook URL.
+- `RENDER_API_HEALTH_URL`: the deployed API readiness URL, for example
+  `https://api.example.com/api/v1/health/ready`.
+
+The Render service itself must also have `ConnectionStrings__SentinelOps`,
+`Sync__RegistrationToken`, `Sync__CursorSigningKey`, and
+`Cors__AllowedOrigins__0` configured as runtime environment variables. GitHub
+does not copy these values into Render automatically; configure them in Render
+directly or add a separate deployment step for that purpose.
+
 ### PWA Verification
 
 PWA installation and service-worker registration require HTTPS in production. `localhost` and loopback origins are also supported for development; opening `index.html` with a `file://` URL is not supported.
@@ -239,4 +257,3 @@ Implemented capabilities:
 - **Device Credential Revocation:** Immediate lost-device revocation via `POST /api/v1/devices/{id}/revoke`.
 - **Dry-Run Backup Migration:** Automated analysis of `.json` and `.zip` backups with relationship audits, numbering collision detection, and safe non-destructive merge.
 - **Complete Deployment Runbook:** Refer to `docs/phase2-deployment-runbook.md` for production topologies, $0 office host setups, security hardening, and backup automation.
-
