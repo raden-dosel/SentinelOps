@@ -57,10 +57,11 @@ public sealed class DeviceController(SentinelOpsDbContext db, IConfiguration con
     public async Task<IActionResult> Revoke(Guid id, CancellationToken cancellationToken)
     {
         var expected = configuration["Sync:RegistrationToken"];
+        var presented = Request.Headers["X-Registration-Token"].ToString();
         if (string.IsNullOrWhiteSpace(expected) ||
             !CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(expected),
-                Encoding.UTF8.GetBytes(Request.Headers["X-Registration-Token"].ToString())))
+                SHA256.HashData(Encoding.UTF8.GetBytes(expected)),
+                SHA256.HashData(Encoding.UTF8.GetBytes(presented))))
             return Unauthorized();
 
         var device = await db.RegisteredDevices.FindAsync([id], cancellationToken);
@@ -75,10 +76,11 @@ public sealed class DeviceController(SentinelOpsDbContext db, IConfiguration con
     public async Task<ActionResult<IReadOnlyList<DeviceSummaryDto>>> List(CancellationToken cancellationToken)
     {
         var expected = configuration["Sync:RegistrationToken"];
+        var presented = Request.Headers["X-Registration-Token"].ToString();
         if (string.IsNullOrWhiteSpace(expected) ||
             !CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(expected),
-                Encoding.UTF8.GetBytes(Request.Headers["X-Registration-Token"].ToString())))
+                SHA256.HashData(Encoding.UTF8.GetBytes(expected)),
+                SHA256.HashData(Encoding.UTF8.GetBytes(presented))))
             return Unauthorized();
 
         var devices = await db.RegisteredDevices.AsNoTracking()

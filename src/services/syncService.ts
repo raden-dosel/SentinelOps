@@ -1,5 +1,6 @@
 import { getDatabase, SyncMetadata, SyncOutboxRecord } from '../storage/database';
 import { generateUUID } from './security';
+import { syncCoordinator, ChangeFeedItem } from './syncCoordinator';
 
 export interface PushResult {
   operationId: string;
@@ -10,14 +11,7 @@ export interface PushResult {
 }
 
 interface ChangesResponse {
-  changes: Array<{
-    sequence: number;
-    entityType: string;
-    entityId: string;
-    operation: 'upsert' | 'delete';
-    revision: string;
-    payload: unknown;
-  }>;
+  changes: ChangeFeedItem[];
   nextCursor: string | null;
   resyncRequired: boolean;
 }
@@ -85,7 +79,7 @@ export async function pullSyncChanges(
   apiBaseUrl: string,
   deviceId: string,
   token: string,
-  apply: (changes: ChangesResponse['changes']) => Promise<void>
+  apply?: (changes: ChangesResponse['changes']) => Promise<void>
 ): Promise<ChangesResponse> {
   const db = await getDatabase();
   const metadata = await db.get('syncMetadata', 'cursor') as SyncMetadata | undefined;
@@ -103,12 +97,16 @@ export async function pullSyncChanges(
   if (result.resyncRequired) {
     throw new Error('A full synchronization reset is required before applying changes.');
   }
-  await apply(result.changes);
-  const updated: SyncMetadata = {
-    id: 'cursor',
-    cursor: result.nextCursor,
-    lastSuccessfulSyncAt: new Date().toISOString(),
-  };
-  await db.put('syncMetadata', updated);
+  if (apply) {
+    await apply(result.changes);
+    const updated: SyncMetadata = {
+      id: 'cursor',
+      cursor: result.nextCursor,
+      lastSuccessfulSyncAt: new Date().toISOString(),
+    };
+    await db.put('syncMetadata', updated);
+  } else {
+    await syncCoordinator.applyChangesAtomically(result.changes, result.nextCursor);
+  }
   return result;
 }
