@@ -109,7 +109,7 @@ Runs the Vitest test suite validating monetary precision, tax calculations, over
 
 ### Phase 2 API development
 
-The API is an additive, authenticated sync slice; the existing IndexedDB application remains usable without it.
+The API is an additive, authenticated sync slice; the existing IndexedDB application remains usable without it. IndexedDB is the tablet's offline cache and durable outbox, while PostgreSQL is the shared cloud source of truth after a device is enrolled. Client and settings changes request an immediate sync when online and are retried by the coordinator when offline.
 
 ```bash
 docker compose -f server/docker-compose.yml up -d postgres
@@ -124,6 +124,12 @@ development. Register a device through
 device token as a bearer token for `/api/v1/sync/push` and `/api/v1/sync/changes`.
 The device token is only returned at registration time and is stored server-side as
 a SHA-256 hash. Do not use the development token in a deployed environment.
+
+For a production PWA build, set `VITE_API_BASE_URL` to the public HTTPS API origin
+before `npm run build` (for example, `https://api.example.com`). Enroll each tablet
+from Settings > Cloud Sync using the same business name and production registration
+token. Existing local records are uploaded through the outbox; the browser never
+connects directly to Neon.
 
 The current API sync slice accepts only `Client`, `Project`, `ProjectProgressNote`,
 and `Settings` payloads. Invoices, payments, quotations, revisions, attachments,

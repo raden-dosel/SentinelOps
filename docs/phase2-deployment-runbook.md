@@ -171,6 +171,17 @@ export ConnectionStrings__SentinelOps="Host=127.0.0.1;Port=5432;Database=sentine
 dotnet ef database update --project server/SentinelOps.Api/SentinelOps.Api.csproj --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
 ```
 
+### 7.1 Production PWA cloud persistence checklist
+
+The PWA is intentionally offline-first: IndexedDB stores the local working set and
+an atomic outbox. Neon receives records only after the API is migrated, deployed,
+and the tablet is enrolled. Set `VITE_API_BASE_URL` to the public API origin before
+building the frontend, then enroll every tablet from Settings > Cloud Sync. After
+enrollment, client and settings saves request an immediate sync and the coordinator
+retries pending operations plus polls at the configured interval. The API is the
+only component that connects to Neon; never put a Neon connection string in frontend
+environment variables.
+
 ---
 
 ## 8. API Build, Publish & Service Configuration

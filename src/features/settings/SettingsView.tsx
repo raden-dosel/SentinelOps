@@ -70,7 +70,9 @@ export const SettingsView: React.FC = () => {
   const [conflicts, setConflicts] = useState<SyncConflictRecord[]>([]);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isEnrolling, setIsEnrolling] = useState(false);
-  const [enrollServerUrl, setEnrollServerUrl] = useState('http://localhost:5000');
+  const [enrollServerUrl, setEnrollServerUrl] = useState(
+    import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
+  );
   const [enrollDeviceName, setEnrollDeviceName] = useState('Operations Tablet 1');
   const [enrollBusinessName, setEnrollBusinessName] = useState('Sentinel Security PH');
   const [enrollRegToken, setEnrollRegToken] = useState('');

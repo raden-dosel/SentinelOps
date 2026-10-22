@@ -6,6 +6,7 @@
 
 import { getDatabase, SyncConfig, SyncMetadata, SyncOutboxRecord, SyncConflictRecord } from '../storage/database';
 import { syncConfigRepository, syncOutboxRepository, syncConflictRepository } from '../storage/repositories';
+import { SYNC_NEEDED_EVENT } from './syncEvents';
 
 export type SyncStatusState =
   | 'Not configured'
@@ -74,6 +75,7 @@ class SyncCoordinator {
   private activeSyncPromise: Promise<boolean> | null = null;
   private consecutiveFailures = 0;
   private scheduledRetryTimer: any = null;
+  private syncIntervalTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -83,6 +85,9 @@ class SyncCoordinator {
       });
       window.addEventListener('offline', () => {
         this.updateState({ isOnline: false, status: 'Offline' });
+      });
+      window.addEventListener(SYNC_NEEDED_EVENT, () => {
+        this.triggerSync();
       });
     }
   }
@@ -106,6 +111,11 @@ class SyncCoordinator {
     const config = await syncConfigRepository.getConfig();
     const pendingCount = await syncOutboxRepository.getPendingCount();
 
+    if (this.syncIntervalTimer) {
+      clearInterval(this.syncIntervalTimer);
+      this.syncIntervalTimer = null;
+    }
+
     if (!config) {
       this.updateState({ status: 'Not configured', pendingCount });
       return;
@@ -121,6 +131,17 @@ class SyncCoordinator {
       businessName: config.businessName,
       deviceName: config.deviceName,
     });
+
+    if (config.autoSync) {
+      const intervalMs = Math.max(1, config.syncIntervalMinutes || 5) * 60 * 1000;
+      this.syncIntervalTimer = setInterval(() => {
+        this.triggerSync();
+      }, intervalMs);
+    }
+
+    if (pendingCount > 0 && this.state.isOnline) {
+      void this.triggerSync();
+    }
   }
 
   /**

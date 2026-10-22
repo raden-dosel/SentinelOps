@@ -22,6 +22,7 @@ import {
 } from '../types';
 import { generateUUID } from '../services/security';
 import { calculateTotals, isInvoiceOverdue } from '../domain/calculations';
+import { requestSync } from '../services/syncEvents';
 
 /**
  * Creates a transaction using only object stores that actually exist in the database instance.
@@ -196,6 +197,7 @@ export const settingsRepository = {
     }
 
     await tx.done;
+    requestSync();
     return updated;
   },
 };
@@ -287,6 +289,7 @@ export const clientRepository = {
     }
 
     await tx.done;
+    requestSync();
     return fullClient;
   },
 
@@ -359,6 +362,7 @@ export const clientRepository = {
     await tx.objectStore('auditEvents').put(auditEvent);
 
     await tx.done;
+    requestSync();
     return true;
   },
 };
