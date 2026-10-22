@@ -52,7 +52,7 @@ jobs:
       - name: Apply migrations to Neon
         shell: bash
         env:
-          MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING }}
+          MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
         run: |
           if [[ -z "${MIGRATION_CONNECTION_STRING//[[:space:]]/}" ]]; then
             echo "::error::NEON_MIGRATION_CONNECTION_STRING is empty or unavailable."
