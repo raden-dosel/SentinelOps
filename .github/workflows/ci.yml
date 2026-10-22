@@ -35,13 +35,27 @@ jobs:
       - name: Build API and tests
         run: dotnet build server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --no-restore
 
+      - name: Validate Neon database secrets
+        env:
+          NEON_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
+          NEON_MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING }}
+        run: |
+          test -n "$NEON_CONNECTION_STRING" || {
+            echo "::error::NEON_CONNECTION_STRING is not configured in the production environment."
+            exit 1
+          }
+          test -n "$NEON_MIGRATION_CONNECTION_STRING" || {
+            echo "::error::NEON_MIGRATION_CONNECTION_STRING is not configured. Use a schema-capable migration role; do not reuse a least-privilege runtime role."
+            exit 1
+          }
+
       - name: Apply migrations to Neon
         run: >
           dotnet ef database update
           --project server/SentinelOps.Api/SentinelOps.Api.csproj
           --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
         env:
-          ConnectionStrings__SentinelOps: ${{ secrets.NEON_CONNECTION_STRING }}
+          ConnectionStrings__SentinelOps: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING }}
 
       - name: Verify Neon integration
         run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --no-build --filter "Category=NeonIntegration"

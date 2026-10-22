@@ -8,8 +8,21 @@ Production schema changes are deliberate deployment steps. The API does not appl
 - Run the read-only checks in `docs/operations/database-target-verification.md`.
 - Confirm an off-host backup exists and that the restore procedure is known.
 - Review the migration list and release commit.
-- Use a migration identity with schema privileges and a separate least-privilege runtime identity where the hosting platform supports it.
+- Use a migration identity with schema privileges and a separate least-privilege runtime identity. Configure them as `NEON_MIGRATION_CONNECTION_STRING` and `NEON_CONNECTION_STRING` respectively in the protected production environment.
 - Do not place a database connection string in frontend variables.
+
+If the migration fails with PostgreSQL `42501: permission denied for schema public`, the
+connection is valid but its role cannot create the EF history table. Using a separate
+migration role is preferred. An owner must grant that role access in the confirmed Neon
+database, without sharing credentials in chat:
+
+```sql
+GRANT USAGE, CREATE ON SCHEMA public TO migration_role;
+```
+
+The runtime role also needs access to the tables after migration. Grant only the
+required application privileges according to the hosting/security policy; do not grant
+schema creation to the runtime role merely to make deployment pass.
 
 ## Disposable verification first
 
@@ -37,7 +50,7 @@ Never paste the value into chat or commit it. Verify the disposable target's mig
 1. Announce a migration window and preserve the current release identifier.
 2. Capture and verify the database backup and restore point.
 3. Re-run target verification against the selected Neon branch.
-4. Run the reviewed EF command from a protected CI environment using the secret manager. The repository's manual GitHub workflow is the intended production mechanism; it is gated by the `deploy_production` input and production environment secrets.
+4. Run the reviewed EF command from a protected CI environment using `NEON_MIGRATION_CONNECTION_STRING`. The repository's manual GitHub workflow is the intended production mechanism; it is gated by the `deploy_production` input and production environment secrets.
 5. Verify `__EFMigrationsHistory` contains the repository migrations and the expected infrastructure tables exist.
 6. Deploy the API commit that matches the migration source.
 7. Check `/api/v1/health/live` and `/api/v1/health/ready`. Readiness must report PostgreSQL healthy without revealing credentials or connection details.

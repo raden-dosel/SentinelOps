@@ -66,7 +66,7 @@ The service worker does not proxy API calls, store credentials, or provide cloud
 - Migrations `20261020015531_InitialCreate` and `20261020030453_SyncProtocol` create those tables. They do not create typed business tables such as `Clients` or `Invoices`.
 - `Program.cs` does not call `Database.Migrate()` or automatically apply migrations at startup.
 - The Docker entrypoint only launches the API. The deployment runbook explicitly describes migration as a separate operator/deployment step.
-- The production workflow applies migrations to the connection string in the GitHub secret `NEON_CONNECTION_STRING`, but that workflow is manual and its execution history/secrets are not available in this audit.
+- The production workflow is manual and now uses the protected `NEON_MIGRATION_CONNECTION_STRING` secret for schema changes, while `NEON_CONNECTION_STRING` is used for integration verification. Its execution history/secrets are not available in this audit.
 
 **Most likely evidence-backed explanations, not confirmed remotely:**
 

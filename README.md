@@ -145,8 +145,10 @@ The `production` job in `.github/workflows/ci.yml` is manual and runs only when
 the `deploy_production` input is enabled. Configure these secrets in the
 repository's `production` GitHub environment:
 
-- `NEON_CONNECTION_STRING`: Neon connection string used for EF migrations and
-  the Neon integration test.
+- `NEON_MIGRATION_CONNECTION_STRING`: Neon connection string for EF migrations;
+  its role must be allowed to create objects in the target schema.
+- `NEON_CONNECTION_STRING`: Neon connection string used for the Neon integration
+  test and runtime verification.
 - `RENDER_DEPLOY_HOOK_URL`: Render service deploy-hook URL.
 - `RENDER_API_HEALTH_URL`: the deployed API readiness URL, for example
   `https://api.example.com/api/v1/health/ready`.
@@ -156,6 +158,11 @@ The Render service itself must also have `ConnectionStrings__SentinelOps`,
 `Cors__AllowedOrigins__0` configured as runtime environment variables. GitHub
 does not copy these values into Render automatically; configure them in Render
 directly or add a separate deployment step for that purpose.
+
+The protected GitHub production environment uses `NEON_MIGRATION_CONNECTION_STRING`
+for EF schema changes and `NEON_CONNECTION_STRING` for integration verification.
+The migration role must have `USAGE` and `CREATE` on the confirmed Neon schema;
+the runtime role should remain least-privileged.
 
 ### PWA Verification
 
