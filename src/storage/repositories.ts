@@ -433,6 +433,7 @@ export const quotationRepository = {
     }
 
     await tx.done;
+    requestSync();
     return record;
   },
 
@@ -501,6 +502,7 @@ export const quotationRepository = {
     }
 
     await tx.done;
+    requestSync();
     return revision;
   },
 
@@ -550,6 +552,7 @@ export const quotationRepository = {
     }
 
     await tx.done;
+    requestSync();
     return true;
   },
 };
@@ -643,6 +646,7 @@ export const invoiceRepository = {
     }
 
     await tx.done;
+    requestSync();
     return record;
   },
 
@@ -688,6 +692,7 @@ export const invoiceRepository = {
     }
 
     await tx.done;
+    requestSync();
     return inv;
   },
 };
@@ -793,6 +798,7 @@ export const paymentRepository = {
     }
 
     await tx.done;
+    requestSync();
     return paymentRecord;
   },
 
@@ -857,6 +863,7 @@ export const paymentRepository = {
     }
 
     await tx.done;
+    requestSync();
     return payment;
   },
 };
@@ -926,6 +933,7 @@ export const projectRepository = {
     }
 
     await tx.done;
+    requestSync();
     return record;
   },
 
@@ -986,6 +994,7 @@ export const projectRepository = {
     }
 
     await tx.done;
+    requestSync();
     return project;
   },
 
@@ -1031,6 +1040,7 @@ export const projectRepository = {
     }
 
     await tx.done;
+    requestSync();
     return true;
   },
 };
@@ -1090,6 +1100,7 @@ export const attachmentRepository = {
     }
 
     await tx.done;
+    requestSync();
     return record;
   },
 
@@ -1129,6 +1140,7 @@ export const attachmentRepository = {
     }
 
     await tx.done;
+    requestSync();
     return true;
   },
 };

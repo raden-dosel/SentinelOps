@@ -128,14 +128,16 @@ a SHA-256 hash. Do not use the development token in a deployed environment.
 For a production PWA build, set `VITE_API_BASE_URL` to the public HTTPS API origin
 before `npm run build` (for example, `https://api.example.com`). Enroll each tablet
 from Settings > Cloud Sync using the same business name and production registration
-token. Existing local records are uploaded through the outbox; the browser never
-connects directly to Neon.
+token. New mutations are uploaded through the outbox; pre-existing local records
+require the explicit dry-run-gated **Queue Cloud Import** action in Settings. The
+browser never connects directly to Neon.
 
-The current API sync slice accepts only `Client`, `Project`, `ProjectProgressNote`,
-and `Settings` payloads. Invoices, payments, quotations, revisions, attachments,
-and audit events remain local-only until typed server validation and transaction
-tests are implemented. See the [Phase 2 readiness audit](docs/phase2-api-database-readiness-audit.md)
-and [deployment runbook](docs/phase2-deployment-runbook.md) before using business data.
+The current API sync slice accepts the allowlisted business payload types, but
+persists them as generic JSON in `SyncEntities`; local audit events and
+attachment bytes remain local-only. Typed relational financial aggregates and
+server-side attachment storage are not implemented. See the [Phase 2 readiness audit](docs/phase2-api-database-readiness-audit.md),
+[database storage remediation](docs/audits/database-storage-remediation.md), and
+[deployment runbook](docs/phase2-deployment-runbook.md) before using business data.
 
 ### Production workflow
 

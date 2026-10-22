@@ -29,6 +29,8 @@ import {
   settingsRepository,
   auditRepository,
 } from '../storage/repositories';
+import { requestSync } from './syncEvents';
+import { generateUUID } from './security';
 
 const APP_VERSION = '1.0.0';
 
@@ -490,6 +492,83 @@ export async function dryRunBackupMigration(data: BackupData): Promise<DryRunMig
     missingRelations,
     warnings,
     recommendation,
+  };
+}
+
+export interface CloudImportQueueResult {
+  report: DryRunMigrationReport;
+  queuedOperationCount: number;
+  attachmentMetadataCount: number;
+}
+
+/**
+ * Queues an approved backup for the normal authenticated sync path.
+ * This does not alter business stores or upload files; it only creates durable
+ * outbox operations after the dry-run has found no relationship or numbering errors.
+ */
+export async function queueBackupForCloudImport(data: BackupData): Promise<CloudImportQueueResult> {
+  const report = await dryRunBackupMigration(data);
+  if (!report.valid || report.missingRelations.length > 0 || report.documentNumberCollisions.length > 0) {
+    throw new Error('Cloud import requires a clean dry-run with no missing relationships or document-number collisions.');
+  }
+
+  const db = await getDatabase();
+  const tx = db.transaction(['syncOutbox'], 'readwrite');
+  const outbox = tx.objectStore('syncOutbox');
+  let queuedOperationCount = 0;
+
+  const queue = (entityType: string, entityId: string, payload: unknown) => {
+    const record = {
+      operationId: generateUUID(),
+      entityType,
+      entityId,
+      operation: 'upsert' as const,
+      baseRevision: null,
+      payload,
+      createdAt: new Date().toISOString(),
+      attempts: 0,
+      status: 'pending' as const,
+    };
+    outbox.put(record);
+    queuedOperationCount++;
+  };
+
+  if (data.settings) queue('Settings', data.settings.id, {
+    businessName: data.settings.businessName,
+    tradingName: data.settings.tradingName,
+    tagline: data.settings.tagline,
+    tinNumber: data.settings.tinNumber,
+    contactNumber: data.settings.contactNumber,
+    email: data.settings.email,
+    website: data.settings.website,
+    address: data.settings.address,
+    city: data.settings.city,
+    region: data.settings.region,
+    postalCode: data.settings.postalCode,
+    currency: data.settings.currency,
+    currencySymbol: data.settings.currencySymbol,
+    taxMode: data.settings.taxMode,
+    taxRatePercent: data.settings.taxRatePercent,
+    defaultQuotationValidityDays: data.settings.defaultQuotationValidityDays,
+    defaultPaymentTerms: data.settings.defaultPaymentTerms,
+    defaultWarrantyTerms: data.settings.defaultWarrantyTerms,
+    defaultQuotationNotes: data.settings.defaultQuotationNotes,
+    updatedAt: data.settings.updatedAt,
+  });
+  for (const client of data.clients || []) queue('Client', client.id, client);
+  for (const quotation of data.quotations || []) queue('Quotation', quotation.id, quotation);
+  for (const revision of data.quotationRevisions || []) queue('QuotationRevision', revision.id, revision);
+  for (const invoice of data.invoices || []) queue('Invoice', invoice.id, invoice);
+  for (const payment of data.payments || []) queue('Payment', payment.id, payment);
+  for (const project of data.projects || []) queue('Project', project.id, project);
+  for (const metadata of data.attachmentsMetadata || []) queue('Attachment', metadata.id, metadata);
+
+  await tx.done;
+  requestSync();
+  return {
+    report,
+    queuedOperationCount,
+    attachmentMetadataCount: data.attachmentsMetadata?.length || 0,
   };
 }
 

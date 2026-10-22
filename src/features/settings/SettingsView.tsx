@@ -15,6 +15,7 @@ import {
   validateBackupFile,
   restoreBackupData,
   dryRunBackupMigration,
+  queueBackupForCloudImport,
   mergeBackupData,
   getStorageEstimate,
   RestorePreview,
@@ -99,6 +100,7 @@ export const SettingsView: React.FC = () => {
   const [isRestoring, setIsRestoring] = useState(false);
   const [isDryRunning, setIsDryRunning] = useState(false);
   const [isMerging, setIsMerging] = useState(false);
+  const [isQueuingCloudImport, setIsQueuingCloudImport] = useState(false);
 
   // Clear data confirm
   const [isWipeDialogOpen, setIsWipeDialogOpen] = useState(false);
@@ -343,6 +345,35 @@ export const SettingsView: React.FC = () => {
       showToast(err instanceof Error ? err.message : 'Merge failed', 'error');
     } finally {
       setIsMerging(false);
+    }
+  };
+
+  const handleQueueCloudImport = async () => {
+    if (!restorePreview?.previewData || !dryRunReport) return;
+    if (!syncConfig) {
+      showToast('Enroll this tablet in Cloud Sync before queueing a cloud import.', 'error');
+      return;
+    }
+    if (dryRunReport.missingRelations.length > 0 || dryRunReport.documentNumberCollisions.length > 0) {
+      showToast('Resolve dry-run relationship and numbering issues before queueing the import.', 'error');
+      return;
+    }
+    if (!window.confirm('Queue this backup for cloud import? Local records will not be replaced, and attachment files remain local-only.')) {
+      return;
+    }
+
+    try {
+      setIsQueuingCloudImport(true);
+      const result = await queueBackupForCloudImport(restorePreview.previewData);
+      showToast(`${result.queuedOperationCount} records queued for cloud synchronization.`, 'success');
+      setRestorePreview(null);
+      setRestoreFile(null);
+      setDryRunReport(null);
+      await loadAll();
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Cloud import queueing failed', 'error');
+    } finally {
+      setIsQueuingCloudImport(false);
     }
   };
 
@@ -1009,7 +1040,7 @@ export const SettingsView: React.FC = () => {
                     <div className="flex flex-wrap items-center gap-3 pt-2">
                       <button
                         onClick={handleExecuteMerge}
-                        disabled={isMerging || isRestoring}
+                        disabled={isMerging || isRestoring || isQueuingCloudImport}
                         className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-md disabled:opacity-50"
                         title="Merge backup records into existing local database without deleting current records"
                       >
@@ -1017,8 +1048,17 @@ export const SettingsView: React.FC = () => {
                       </button>
 
                       <button
+                        onClick={handleQueueCloudImport}
+                        disabled={isQueuingCloudImport || isMerging || isRestoring || !syncConfig || !dryRunReport || dryRunReport.missingRelations.length > 0 || dryRunReport.documentNumberCollisions.length > 0}
+                        className="px-4 py-2 rounded-xl border border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-xs font-bold text-cyan-300 shadow-md disabled:opacity-50"
+                        title="Queue this clean backup for authenticated cloud synchronization without replacing local records"
+                      >
+                        {isQueuingCloudImport ? 'Queueing Cloud Import...' : 'Queue Cloud Import'}
+                      </button>
+
+                      <button
                         onClick={handleExecuteRestore}
-                        disabled={isRestoring || isMerging}
+                        disabled={isRestoring || isMerging || isQueuingCloudImport}
                         className="px-4 py-2 rounded-xl bg-purple-600/90 hover:bg-purple-600 text-xs font-bold text-white shadow-md disabled:opacity-50"
                         title="Replace all local records with backup archive"
                       >
