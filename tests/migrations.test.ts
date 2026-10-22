@@ -151,4 +151,25 @@ describe('IndexedDB Migration & Schema Preservation (v1 -> v2)', () => {
     expect(db2.version).toBe(2);
     db2.close();
   });
+
+  it('self-heals missing stores when an existing database was opened without sync stores', async () => {
+    // Simulate a database where syncOutbox was never created
+    const stuckDb = await openDB('sentinelops_db', 2, {
+      upgrade(db) {
+        // Only created core stores, missed sync stores
+        db.createObjectStore('clients', { keyPath: 'id' });
+        db.createObjectStore('auditEvents', { keyPath: 'id' });
+        db.createObjectStore('settings', { keyPath: 'id' });
+      },
+    });
+    expect(stuckDb.objectStoreNames.contains('syncOutbox')).toBe(false);
+    stuckDb.close();
+
+    // Now getDatabase() is called by the application
+    const healedDb = await (await import('../src/storage/database')).getDatabase();
+    expect(healedDb.objectStoreNames.contains('syncOutbox')).toBe(true);
+    expect(healedDb.objectStoreNames.contains('clients')).toBe(true);
+    expect(healedDb.objectStoreNames.contains('auditEvents')).toBe(true);
+    healedDb.close();
+  });
 });

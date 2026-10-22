@@ -3,6 +3,7 @@
  * Encapsulates data access, transactional updates, durable outbox queuing, and integrity rules.
  */
 
+import { openDB, IDBPDatabase } from 'idb';
 import { getDatabase, DEFAULT_SETTINGS, SyncOutboxRecord, SyncConfig, SyncConflictRecord, SyncMetadata } from './database';
 import {
   LocalUser,
@@ -23,17 +24,52 @@ import { generateUUID } from '../services/security';
 import { calculateTotals, isInvoiceOverdue } from '../domain/calculations';
 
 /**
+ * Creates a transaction using only object stores that actually exist in the database instance.
+ * Completely eliminates "One of the specified object stores was not found" DOMExceptions
+ * during database upgrades or schema transitions.
+ */
+export function safeTransaction(
+  db: IDBPDatabase,
+  storeNames: string[],
+  mode: IDBTransactionMode = 'readwrite'
+) {
+  const available = storeNames.filter((s) => db.objectStoreNames.contains(s));
+  if (available.length === 0) {
+    throw new Error(`Failed to create transaction: none of requested stores [${storeNames.join(', ')}] exist in database.`);
+  }
+  const tx = (db as any).transaction(available, mode);
+  return tx as {
+    objectStore: (name: string) => any;
+    objectStoreNames: DOMStringList;
+    done: Promise<void>;
+  };
+}
+
+/**
  * Enqueue an outbox record inside an active readwrite transaction.
  * If the transaction aborts, the outbox record is rolled back with the entity change.
+ * If syncOutbox is not available, safely no-ops without breaking local mutations.
  */
 function enqueueOutboxRecord(
-  outboxStore: any,
+  txOrStore: any,
   entityType: string,
   entityId: string,
   operation: 'upsert' | 'delete',
   payload: unknown,
   baseRevision: string | null = null
-): SyncOutboxRecord {
+): SyncOutboxRecord | null {
+  if (!txOrStore) return null;
+  let outboxStore: any;
+  if (txOrStore.objectStore) {
+    if (!txOrStore.objectStoreNames?.contains('syncOutbox')) {
+      return null;
+    }
+    outboxStore = txOrStore.objectStore('syncOutbox');
+  } else {
+    outboxStore = txOrStore;
+  }
+  if (!outboxStore || typeof outboxStore.put !== 'function') return null;
+
   const record: SyncOutboxRecord = {
     operationId: generateUUID(),
     entityType,
@@ -80,13 +116,25 @@ export const userRepository = {
 // ======================== APP SETTINGS ========================
 export const settingsRepository = {
   async getSettings(): Promise<AppSettings> {
-    const db = await getDatabase();
-    const settings = (await db.get('settings', 'current_settings')) as AppSettings | undefined;
-    if (!settings) {
-      await db.put('settings', DEFAULT_SETTINGS);
+    try {
+      const db = await getDatabase();
+      if (!db.objectStoreNames.contains('settings')) {
+        return DEFAULT_SETTINGS;
+      }
+      const settings = (await db.get('settings', 'current_settings')) as AppSettings | undefined;
+      if (!settings) {
+        try {
+          await db.put('settings', DEFAULT_SETTINGS);
+        } catch {
+          // Non-fatal if initial write fails
+        }
+        return DEFAULT_SETTINGS;
+      }
+      return settings;
+    } catch (err) {
+      console.warn('Failed to retrieve settings from IndexedDB, using defaults:', err);
       return DEFAULT_SETTINGS;
     }
-    return settings;
   },
 
   async saveSettings(settings: AppSettings, actorName = 'Admin'): Promise<AppSettings> {
@@ -97,38 +145,40 @@ export const settingsRepository = {
       updatedAt: new Date().toISOString(),
     };
 
-    const tx = db.transaction(['settings', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['settings', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('settings').put(updated);
 
     // Enqueue synchronized business settings (public business profile only)
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Settings',
-      'current_settings',
-      'upsert',
-      {
-        businessName: updated.businessName,
-        tradingName: updated.tradingName,
-        tagline: updated.tagline,
-        tinNumber: updated.tinNumber,
-        contactNumber: updated.contactNumber,
-        email: updated.email,
-        website: updated.website,
-        address: updated.address,
-        city: updated.city,
-        region: updated.region,
-        postalCode: updated.postalCode,
-        currency: updated.currency,
-        currencySymbol: updated.currencySymbol,
-        taxMode: updated.taxMode,
-        taxRatePercent: updated.taxRatePercent,
-        defaultQuotationValidityDays: updated.defaultQuotationValidityDays,
-        defaultPaymentTerms: updated.defaultPaymentTerms,
-        defaultWarrantyTerms: updated.defaultWarrantyTerms,
-        defaultQuotationNotes: updated.defaultQuotationNotes,
-        updatedAt: updated.updatedAt,
-      }
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Settings',
+        'current_settings',
+        'upsert',
+        {
+          businessName: updated.businessName,
+          tradingName: updated.tradingName,
+          tagline: updated.tagline,
+          tinNumber: updated.tinNumber,
+          contactNumber: updated.contactNumber,
+          email: updated.email,
+          website: updated.website,
+          address: updated.address,
+          city: updated.city,
+          region: updated.region,
+          postalCode: updated.postalCode,
+          currency: updated.currency,
+          currencySymbol: updated.currencySymbol,
+          taxMode: updated.taxMode,
+          taxRatePercent: updated.taxRatePercent,
+          defaultQuotationValidityDays: updated.defaultQuotationValidityDays,
+          defaultPaymentTerms: updated.defaultPaymentTerms,
+          defaultWarrantyTerms: updated.defaultWarrantyTerms,
+          defaultQuotationNotes: updated.defaultQuotationNotes,
+          updatedAt: updated.updatedAt,
+        }
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -141,7 +191,9 @@ export const settingsRepository = {
       actorName,
       details: { businessName: updated.businessName, taxMode: updated.taxMode },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return updated;
@@ -157,12 +209,15 @@ export const auditRepository = {
       id: generateUUID(),
       timestamp: new Date().toISOString(),
     };
-    await db.put('auditEvents', event);
+    if (db.objectStoreNames.contains('auditEvents')) {
+      await db.put('auditEvents', event);
+    }
     return event;
   },
 
   async getAll(): Promise<AuditEvent[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('auditEvents')) return [];
     const events = (await db.getAll('auditEvents')) as AuditEvent[];
     return events.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   },
@@ -172,12 +227,14 @@ export const auditRepository = {
 export const clientRepository = {
   async getAll(): Promise<Client[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('clients')) return [];
     const clients = (await db.getAll('clients')) as Client[];
     return clients.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   },
 
   async getById(id: ID): Promise<Client | null> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('clients')) return null;
     const client = await db.get('clients', id);
     return (client as Client) || null;
   },
@@ -190,7 +247,9 @@ export const clientRepository = {
     const now = new Date().toISOString();
     const isNew = !client.id;
 
-    const existing = client.id ? ((await db.get('clients', client.id)) as Client | undefined) : undefined;
+    const existing = client.id && db.objectStoreNames.contains('clients')
+      ? ((await db.get('clients', client.id)) as Client | undefined)
+      : undefined;
     const fullClient: Client = {
       ...client,
       id: client.id || generateUUID(),
@@ -198,17 +257,19 @@ export const clientRepository = {
       updatedAt: now,
     };
 
-    const tx = db.transaction(['clients', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['clients', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('clients').put(fullClient);
 
     // Atomic Outbox Enqueue
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Client',
-      fullClient.id,
-      'upsert',
-      fullClient
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Client',
+        fullClient.id,
+        'upsert',
+        fullClient
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -221,7 +282,9 @@ export const clientRepository = {
       actorName,
       details: { leadStatus: fullClient.leadStatus, leadSource: fullClient.leadSource },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return fullClient;
@@ -229,26 +292,32 @@ export const clientRepository = {
 
   async canDelete(id: ID): Promise<{ canDelete: boolean; reason?: string }> {
     const db = await getDatabase();
-    const quotations = await db.getAllFromIndex('quotations', 'clientId', id);
-    if (quotations.length > 0) {
-      return {
-        canDelete: false,
-        reason: `Cannot delete client with ${quotations.length} linked quotation(s). Mark status as Lost instead to preserve historical records.`,
-      };
+    if (db.objectStoreNames.contains('quotations')) {
+      const quotations = await db.getAllFromIndex('quotations', 'clientId', id);
+      if (quotations.length > 0) {
+        return {
+          canDelete: false,
+          reason: `Cannot delete client with ${quotations.length} linked quotation(s). Mark status as Lost instead to preserve historical records.`,
+        };
+      }
     }
-    const invoices = await db.getAllFromIndex('invoices', 'clientId', id);
-    if (invoices.length > 0) {
-      return {
-        canDelete: false,
-        reason: `Cannot delete client with ${invoices.length} linked invoice(s). Financial records must be preserved.`,
-      };
+    if (db.objectStoreNames.contains('invoices')) {
+      const invoices = await db.getAllFromIndex('invoices', 'clientId', id);
+      if (invoices.length > 0) {
+        return {
+          canDelete: false,
+          reason: `Cannot delete client with ${invoices.length} linked invoice(s). Financial records must be preserved.`,
+        };
+      }
     }
-    const projects = await db.getAllFromIndex('projects', 'clientId', id);
-    if (projects.length > 0) {
-      return {
-        canDelete: false,
-        reason: `Cannot delete client with ${projects.length} linked project(s).`,
-      };
+    if (db.objectStoreNames.contains('projects')) {
+      const projects = await db.getAllFromIndex('projects', 'clientId', id);
+      if (projects.length > 0) {
+        return {
+          canDelete: false,
+          reason: `Cannot delete client with ${projects.length} linked project(s).`,
+        };
+      }
     }
     return { canDelete: true };
   },
@@ -262,17 +331,19 @@ export const clientRepository = {
     const existing = await this.getById(id);
     if (!existing) return false;
 
-    const tx = db.transaction(['clients', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['clients', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('clients').delete(id);
 
     // Atomic Tombstone Enqueue
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Client',
-      id,
-      'delete',
-      { id, deletedAt: new Date().toISOString() }
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Client',
+        id,
+        'delete',
+        { id, deletedAt: new Date().toISOString() }
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -324,17 +395,19 @@ export const quotationRepository = {
     };
 
     const isNew = !existing;
-    const tx = db.transaction(['quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('quotations').put(record);
 
     // Atomic Outbox Enqueue
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Quotation',
-      record.id,
-      'upsert',
-      record
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Quotation',
+        record.id,
+        'upsert',
+        record
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -351,7 +424,9 @@ export const quotationRepository = {
         clientName: record.clientName,
       },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return record;
@@ -380,27 +455,31 @@ export const quotationRepository = {
     current.revisionNumber = nextRevNum;
     current.updatedAt = new Date().toISOString();
 
-    const tx = db.transaction(['quotationRevisions', 'quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
-    await tx.objectStore('quotationRevisions').put(revision);
+    const tx = safeTransaction(db, ['quotationRevisions', 'quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
+    if (tx.objectStoreNames.contains('quotationRevisions')) {
+      await tx.objectStore('quotationRevisions').put(revision);
+    }
     await tx.objectStore('quotations').put(current);
 
     // Outbox: QuotationRevision snapshot (append-only)
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'QuotationRevision',
-      revision.id,
-      'upsert',
-      revision
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'QuotationRevision',
+        revision.id,
+        'upsert',
+        revision
+      );
 
-    // Outbox: Updated Quotation state
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Quotation',
-      current.id,
-      'upsert',
-      current
-    );
+      // Outbox: Updated Quotation state
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Quotation',
+        current.id,
+        'upsert',
+        current
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -413,7 +492,9 @@ export const quotationRepository = {
       actorName,
       details: { revisionNumber: current.revisionNumber, reason },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return revision;
@@ -421,6 +502,7 @@ export const quotationRepository = {
 
   async getRevisions(quotationId: ID): Promise<QuotationRevision[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('quotationRevisions')) return [];
     const revs = (await db.getAllFromIndex('quotationRevisions', 'quotationId', quotationId)) as QuotationRevision[];
     return revs.sort((a, b) => b.revisionNumber - a.revisionNumber);
   },
@@ -434,17 +516,19 @@ export const quotationRepository = {
       throw new Error('Cannot delete quotation that has already been converted to an invoice.');
     }
 
-    const tx = db.transaction(['quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('quotations').delete(id);
 
     // Outbox tombstone
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Quotation',
-      id,
-      'delete',
-      { id, quotationNumber: quotation.quotationNumber, deletedAt: new Date().toISOString() }
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Quotation',
+        id,
+        'delete',
+        { id, quotationNumber: quotation.quotationNumber, deletedAt: new Date().toISOString() }
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -457,7 +541,9 @@ export const quotationRepository = {
       actorName,
       details: { deleted: true },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return true;
@@ -468,6 +554,7 @@ export const quotationRepository = {
 export const invoiceRepository = {
   async getAll(): Promise<Invoice[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('invoices')) return [];
     const invoices = (await db.getAll('invoices')) as Invoice[];
     const today = new Date().toISOString().split('T')[0];
     return invoices
@@ -482,6 +569,7 @@ export const invoiceRepository = {
 
   async getById(id: ID): Promise<Invoice | null> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('invoices')) return null;
     const inv = (await db.get('invoices', id)) as Invoice | undefined;
     if (!inv) return null;
     const today = new Date().toISOString().split('T')[0];
@@ -493,12 +581,14 @@ export const invoiceRepository = {
 
   async getByClientId(clientId: ID): Promise<Invoice[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('invoices')) return [];
     const invoices = (await db.getAllFromIndex('invoices', 'clientId', clientId)) as Invoice[];
     return invoices.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   },
 
   async getByProjectId(projectId: ID): Promise<Invoice[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('invoices')) return [];
     const invoices = (await db.getAllFromIndex('invoices', 'projectId', projectId)) as Invoice[];
     return invoices.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   },
@@ -515,17 +605,19 @@ export const invoiceRepository = {
     };
 
     const isNew = !existing;
-    const tx = db.transaction(['invoices', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['invoices', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('invoices').put(record);
 
     // Atomic Outbox Enqueue
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Invoice',
-      record.id,
-      'upsert',
-      record
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Invoice',
+        record.id,
+        'upsert',
+        record
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -542,7 +634,9 @@ export const invoiceRepository = {
         remainingBalanceCentavos: record.remainingBalanceCentavos,
       },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return record;
@@ -560,17 +654,19 @@ export const invoiceRepository = {
     inv.notes = (inv.notes ? inv.notes + '\n' : '') + `[VOIDED by ${actorName}: ${reason}]`;
     inv.updatedAt = new Date().toISOString();
 
-    const tx = db.transaction(['invoices', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['invoices', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('invoices').put(inv);
 
     // Outbox: voided invoice update
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Invoice',
-      inv.id,
-      'upsert',
-      inv
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Invoice',
+        inv.id,
+        'upsert',
+        inv
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -583,7 +679,9 @@ export const invoiceRepository = {
       actorName,
       details: { reason },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return inv;
@@ -619,10 +717,9 @@ export const paymentRepository = {
     }
 
     const db = await getDatabase();
-    const tx = db.transaction(['invoices', 'payments', 'projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['invoices', 'payments', 'projects', 'syncOutbox', 'auditEvents'], 'readwrite');
     const invoiceStore = tx.objectStore('invoices');
     const paymentStore = tx.objectStore('payments');
-    const outboxStore = tx.objectStore('syncOutbox');
 
     const invoice = (await invoiceStore.get(payment.invoiceId)) as Invoice | undefined;
     if (!invoice) throw new Error('Invoice not found');
@@ -653,20 +750,24 @@ export const paymentRepository = {
     await paymentStore.put(paymentRecord);
 
     // Update project totalPaid if linked
-    if (invoice.projectId) {
+    if (invoice.projectId && tx.objectStoreNames.contains('projects')) {
       const projectStore = tx.objectStore('projects');
       const project = (await projectStore.get(invoice.projectId)) as Project | undefined;
       if (project) {
         project.totalPaidCentavos = (project.totalPaidCentavos || 0) + payment.amountCentavos;
         project.updatedAt = new Date().toISOString();
         await projectStore.put(project);
-        enqueueOutboxRecord(outboxStore, 'Project', project.id, 'upsert', project);
+        if (tx.objectStoreNames.contains('syncOutbox')) {
+          enqueueOutboxRecord(tx.objectStore('syncOutbox'), 'Project', project.id, 'upsert', project);
+        }
       }
     }
 
     // Atomic Outbox Enqueue: Payment (financial event) + Invoice updated state
-    enqueueOutboxRecord(outboxStore, 'Payment', paymentRecord.id, 'upsert', paymentRecord);
-    enqueueOutboxRecord(outboxStore, 'Invoice', invoice.id, 'upsert', invoice);
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(tx.objectStore('syncOutbox'), 'Payment', paymentRecord.id, 'upsert', paymentRecord);
+      enqueueOutboxRecord(tx.objectStore('syncOutbox'), 'Invoice', invoice.id, 'upsert', invoice);
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -683,7 +784,9 @@ export const paymentRepository = {
         remainingBalanceCentavos: newRemaining,
       },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return paymentRecord;
@@ -691,10 +794,9 @@ export const paymentRepository = {
 
   async reversePayment(paymentId: ID, reason: string, actorName = 'Admin'): Promise<Payment> {
     const db = await getDatabase();
-    const tx = db.transaction(['invoices', 'payments', 'projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['invoices', 'payments', 'projects', 'syncOutbox', 'auditEvents'], 'readwrite');
     const paymentStore = tx.objectStore('payments');
     const invoiceStore = tx.objectStore('invoices');
-    const outboxStore = tx.objectStore('syncOutbox');
 
     const payment = (await paymentStore.get(paymentId)) as Payment | undefined;
     if (!payment) throw new Error('Payment not found');
@@ -716,20 +818,24 @@ export const paymentRepository = {
     payment.reversalReason = reason;
     await paymentStore.put(payment);
 
-    if (invoice.projectId) {
+    if (invoice.projectId && tx.objectStoreNames.contains('projects')) {
       const projectStore = tx.objectStore('projects');
       const project = (await projectStore.get(invoice.projectId)) as Project | undefined;
       if (project) {
         project.totalPaidCentavos = Math.max(0, (project.totalPaidCentavos || 0) - payment.amountCentavos);
         project.updatedAt = new Date().toISOString();
         await projectStore.put(project);
-        enqueueOutboxRecord(outboxStore, 'Project', project.id, 'upsert', project);
+        if (tx.objectStoreNames.contains('syncOutbox')) {
+          enqueueOutboxRecord(tx.objectStore('syncOutbox'), 'Project', project.id, 'upsert', project);
+        }
       }
     }
 
     // Atomic Outbox Enqueue: Payment reversal + Invoice restored state
-    enqueueOutboxRecord(outboxStore, 'Payment', payment.id, 'upsert', payment);
-    enqueueOutboxRecord(outboxStore, 'Invoice', invoice.id, 'upsert', invoice);
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(tx.objectStore('syncOutbox'), 'Payment', payment.id, 'upsert', payment);
+      enqueueOutboxRecord(tx.objectStore('syncOutbox'), 'Invoice', invoice.id, 'upsert', invoice);
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -742,7 +848,9 @@ export const paymentRepository = {
       actorName,
       details: { reason, amountCentavos: payment.amountCentavos },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return payment;
@@ -753,18 +861,21 @@ export const paymentRepository = {
 export const projectRepository = {
   async getAll(): Promise<Project[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('projects')) return [];
     const projects = (await db.getAll('projects')) as Project[];
     return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   },
 
   async getById(id: ID): Promise<Project | null> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('projects')) return null;
     const p = await db.get('projects', id);
     return (p as Project) || null;
   },
 
   async getByClientId(clientId: ID): Promise<Project[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('projects')) return [];
     const projects = (await db.getAllFromIndex('projects', 'clientId', clientId)) as Project[];
     return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   },
@@ -781,17 +892,19 @@ export const projectRepository = {
     };
 
     const isNew = !existing;
-    const tx = db.transaction(['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('projects').put(record);
 
     // Atomic Outbox Enqueue
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Project',
-      record.id,
-      'upsert',
-      record
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Project',
+        record.id,
+        'upsert',
+        record
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -804,7 +917,9 @@ export const projectRepository = {
       actorName,
       details: { status: record.status, clientName: record.clientName },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return record;
@@ -837,17 +952,19 @@ export const projectRepository = {
     }
     project.updatedAt = new Date().toISOString();
 
-    const tx = db.transaction(['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('projects').put(project);
 
     // Outbox: Updated project with progress note
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Project',
-      project.id,
-      'upsert',
-      project
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Project',
+        project.id,
+        'upsert',
+        project
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -860,7 +977,9 @@ export const projectRepository = {
       actorName: author,
       details: { text, statusChange },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return project;
@@ -871,22 +990,26 @@ export const projectRepository = {
     const project = (await db.get('projects', id)) as Project | undefined;
     if (!project) return false;
 
-    const invoices = (await db.getAllFromIndex('invoices', 'projectId', id)) as Invoice[];
-    if (invoices.length > 0) {
-      throw new Error(`Cannot delete project with ${invoices.length} linked invoice(s). Close the project instead to preserve history.`);
+    if (db.objectStoreNames.contains('invoices')) {
+      const invoices = (await db.getAllFromIndex('invoices', 'projectId', id)) as Invoice[];
+      if (invoices.length > 0) {
+        throw new Error(`Cannot delete project with ${invoices.length} linked invoice(s). Close the project instead to preserve history.`);
+      }
     }
 
-    const tx = db.transaction(['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['projects', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('projects').delete(id);
 
     // Outbox tombstone
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Project',
-      id,
-      'delete',
-      { id, projectNumber: project.projectNumber, deletedAt: new Date().toISOString() }
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Project',
+        id,
+        'delete',
+        { id, projectNumber: project.projectNumber, deletedAt: new Date().toISOString() }
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -899,7 +1022,9 @@ export const projectRepository = {
       actorName,
       details: { deleted: true },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return true;
@@ -910,13 +1035,14 @@ export const projectRepository = {
 export const attachmentRepository = {
   async getByEntity(entityType: AttachmentMetadata['entityType'], entityId: ID): Promise<AttachmentRecord[]> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('attachments')) return [];
     const all = (await db.getAllFromIndex('attachments', 'entityId', entityId)) as AttachmentRecord[];
     return all.filter((a) => a.entityType === entityType);
   },
 
   async saveAttachment(record: AttachmentRecord, actorName = 'Admin'): Promise<AttachmentRecord> {
     const db = await getDatabase();
-    const tx = db.transaction(['attachments', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['attachments', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('attachments').put(record);
 
     // Outbox metadata (omits raw binary blob to avoid bloating sync feed payloads)
@@ -930,13 +1056,15 @@ export const attachmentRepository = {
       caption: record.caption,
       uploadedAt: record.uploadedAt,
     };
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Attachment',
-      record.id,
-      'upsert',
-      metadataPayload
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Attachment',
+        record.id,
+        'upsert',
+        metadataPayload
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -953,7 +1081,9 @@ export const attachmentRepository = {
         parentEntity: `${record.entityType}:${record.entityId}`,
       },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return record;
@@ -961,20 +1091,23 @@ export const attachmentRepository = {
 
   async deleteAttachment(id: ID, actorName = 'Admin'): Promise<boolean> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('attachments')) return false;
     const existing = (await db.get('attachments', id)) as AttachmentRecord | undefined;
     if (!existing) return false;
 
-    const tx = db.transaction(['attachments', 'syncOutbox', 'auditEvents'], 'readwrite');
+    const tx = safeTransaction(db, ['attachments', 'syncOutbox', 'auditEvents'], 'readwrite');
     await tx.objectStore('attachments').delete(id);
 
     // Outbox tombstone
-    enqueueOutboxRecord(
-      tx.objectStore('syncOutbox'),
-      'Attachment',
-      id,
-      'delete',
-      { id, fileName: existing.fileName, deletedAt: new Date().toISOString() }
-    );
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(
+        tx.objectStore('syncOutbox'),
+        'Attachment',
+        id,
+        'delete',
+        { id, fileName: existing.fileName, deletedAt: new Date().toISOString() }
+      );
+    }
 
     const auditEvent: AuditEvent = {
       id: generateUUID(),
@@ -987,7 +1120,9 @@ export const attachmentRepository = {
       actorName,
       details: { parentEntity: `${existing.entityType}:${existing.entityId}` },
     };
-    await tx.objectStore('auditEvents').put(auditEvent);
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put(auditEvent);
+    }
 
     await tx.done;
     return true;
@@ -997,49 +1132,74 @@ export const attachmentRepository = {
 // ======================== SYNC SUBSYSTEM REPOSITORIES ========================
 export const syncConfigRepository = {
   async getConfig(): Promise<SyncConfig | null> {
-    const db = await getDatabase();
-    const config = (await db.get('syncConfig', 'current_config')) as SyncConfig | undefined;
-    return config || null;
+    try {
+      const db = await getDatabase();
+      if (!db.objectStoreNames.contains('syncConfig')) return null;
+      const config = (await db.get('syncConfig', 'current_config')) as SyncConfig | undefined;
+      return config || null;
+    } catch (err) {
+      console.warn('Failed to get sync config:', err);
+      return null;
+    }
   },
 
   async saveConfig(config: SyncConfig): Promise<SyncConfig> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('syncConfig')) return config;
     await db.put('syncConfig', { ...config, id: 'current_config' as const });
     return config;
   },
 
   async clearConfig(): Promise<void> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('syncConfig')) return;
     await db.delete('syncConfig', 'current_config');
   },
 };
 
 export const syncOutboxRepository = {
   async getPendingCount(): Promise<number> {
-    const db = await getDatabase();
-    return await db.count('syncOutbox');
+    try {
+      const db = await getDatabase();
+      if (!db.objectStoreNames.contains('syncOutbox')) return 0;
+      return await db.count('syncOutbox');
+    } catch {
+      return 0;
+    }
   },
 
   async getPendingOperations(limit = 100): Promise<SyncOutboxRecord[]> {
-    const db = await getDatabase();
-    const ops = (await db.getAllFromIndex('syncOutbox', 'createdAt')) as SyncOutboxRecord[];
-    return ops.slice(0, limit);
+    try {
+      const db = await getDatabase();
+      if (!db.objectStoreNames.contains('syncOutbox')) return [];
+      const ops = (await db.getAllFromIndex('syncOutbox', 'createdAt')) as SyncOutboxRecord[];
+      return ops.slice(0, limit);
+    } catch {
+      return [];
+    }
   },
 
   async clearOutbox(): Promise<void> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('syncOutbox')) return;
     await db.clear('syncOutbox');
   },
 };
 
 export const syncConflictRepository = {
   async getAll(): Promise<SyncConflictRecord[]> {
-    const db = await getDatabase();
-    return (await db.getAll('syncConflicts')) as SyncConflictRecord[];
+    try {
+      const db = await getDatabase();
+      if (!db.objectStoreNames.contains('syncConflicts')) return [];
+      return (await db.getAll('syncConflicts')) as SyncConflictRecord[];
+    } catch {
+      return [];
+    }
   },
 
   async resolveConflict(operationId: string): Promise<void> {
     const db = await getDatabase();
+    if (!db.objectStoreNames.contains('syncConflicts')) return;
     await db.delete('syncConflicts', operationId);
   },
 };

@@ -7,7 +7,25 @@ import { openDB, IDBPDatabase } from 'idb';
 import { AppSettings, NumberSequence } from '../types';
 
 export const DB_NAME = 'sentinelops_db';
-export const DB_VERSION = 2;
+export const DB_VERSION = 4;
+
+export const REQUIRED_STORES = [
+  'users',
+  'settings',
+  'numberSequences',
+  'clients',
+  'quotations',
+  'quotationRevisions',
+  'invoices',
+  'payments',
+  'projects',
+  'attachments',
+  'auditEvents',
+  'syncOutbox',
+  'syncMetadata',
+  'syncConflicts',
+  'syncConfig',
+] as const;
 
 export interface SyncOutboxRecord {
   operationId: string;
@@ -97,7 +115,7 @@ export function upgradeDatabaseSchema(
   newVersion: number | null
 ): void {
   // Version 1: Core domain stores (Phase 1 MVP)
-  if (oldVersion < 1 && (newVersion === null || newVersion >= 1)) {
+  if (newVersion === null || newVersion >= 1) {
     if (!db.objectStoreNames.contains('users')) {
       const userStore = db.createObjectStore('users', { keyPath: 'id' });
       userStore.createIndex('username', 'username', { unique: true });
@@ -174,9 +192,8 @@ export function upgradeDatabaseSchema(
     }
   }
 
-  // Version 2: Synchronization subsystem stores (Phase 2)
-  // Evaluated independently of oldVersion < 1 so that existing v1 databases upgrade correctly
-  if (oldVersion < 2 && (newVersion === null || newVersion >= 2)) {
+  // Version 2 & 3: Synchronization subsystem stores (Phase 2 & Upgrades)
+  if (newVersion === null || newVersion >= 2) {
     if (!db.objectStoreNames.contains('syncOutbox')) {
       const outbox = db.createObjectStore('syncOutbox', { keyPath: 'operationId' });
       outbox.createIndex('createdAt', 'createdAt', { unique: false });
@@ -200,12 +217,57 @@ export function upgradeDatabaseSchema(
   }
 }
 
-export async function getDatabase(): Promise<IDBPDatabase> {
-  return openDB(DB_NAME, DB_VERSION, {
-    upgrade(db, oldVersion, newVersion) {
-      upgradeDatabaseSchema(db, oldVersion, newVersion);
-    },
-  });
+let activeDbPromise: Promise<IDBPDatabase> | null = null;
+
+export function resetDatabaseConnection(): void {
+  activeDbPromise = null;
+}
+
+export function getDatabase(): Promise<IDBPDatabase> {
+  if (!activeDbPromise) {
+    activeDbPromise = (async () => {
+      const openDbWithVersion = async (version: number): Promise<IDBPDatabase> => {
+        return openDB(DB_NAME, version, {
+          upgrade(db, oldVersion, newVersion) {
+            upgradeDatabaseSchema(db, oldVersion, newVersion);
+          },
+          blocked() {
+            console.warn('[IndexedDB] Database upgrade blocked by another connection.');
+          },
+          blocking(_currentVersion, _blockedVersion, event) {
+            console.warn('[IndexedDB] Database upgrade pending; closing connection.');
+            activeDbPromise = null;
+            (event.target as IDBDatabase)?.close();
+          },
+          terminated() {
+            activeDbPromise = null;
+          },
+        });
+      };
+
+      let db = await openDbWithVersion(DB_VERSION);
+
+      // Self-healing check: verify all required stores actually exist
+      const missingStores = REQUIRED_STORES.filter((s) => !db.objectStoreNames.contains(s));
+      if (missingStores.length > 0) {
+        console.warn(`[IndexedDB] Detected missing store(s): ${missingStores.join(', ')}. Triggering auto-upgrade...`);
+        const nextVersion = Math.max(db.version + 1, DB_VERSION + 1);
+        db.close();
+        db = await openDbWithVersion(nextVersion);
+      }
+
+      db.addEventListener('close', () => {
+        activeDbPromise = null;
+      });
+
+      return db;
+    })().catch((err) => {
+      activeDbPromise = null;
+      throw err;
+    });
+  }
+
+  return activeDbPromise;
 }
 
 /**
@@ -255,11 +317,12 @@ export async function clearAllDatabaseData(): Promise<void> {
     'syncConflicts',
     'syncConfig',
   ];
-  const tx = db.transaction(stores, 'readwrite');
-  for (const storeName of stores) {
-    if (db.objectStoreNames.contains(storeName)) {
+  const availableStores = stores.filter((s) => db.objectStoreNames.contains(s));
+  if (availableStores.length > 0) {
+    const tx = db.transaction(availableStores, 'readwrite');
+    for (const storeName of availableStores) {
       await tx.objectStore(storeName).clear();
     }
+    await tx.done;
   }
-  await tx.done;
 }

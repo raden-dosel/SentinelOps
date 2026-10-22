@@ -8,7 +8,7 @@ import {
   syncConflictRepository,
   syncOutboxRepository,
 } from '../../storage/repositories';
-import { clearAllDatabaseData, SyncConfig, SyncConflictRecord } from '../../storage/database';
+import { clearAllDatabaseData, SyncConfig, SyncConflictRecord, DEFAULT_SETTINGS } from '../../storage/database';
 import {
   exportJsonBackup,
   exportZipBackup,
@@ -59,7 +59,7 @@ export const SettingsView: React.FC = () => {
     'business' | 'tax' | 'quotation' | 'numbering' | 'security' | 'backup' | 'audit' | 'sync'
   >('business');
 
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [auditFilter, setAuditFilter] = useState('');
   const [loading, setLoading] = useState(true);
@@ -105,23 +105,29 @@ export const SettingsView: React.FC = () => {
     try {
       setLoading(true);
       const [currSettings, events, storage, cfg, confl] = await Promise.all([
-        settingsRepository.getSettings(),
-        auditRepository.getAll(),
-        getStorageEstimate(),
-        syncConfigRepository.getConfig(),
-        syncConflictRepository.getAll(),
+        settingsRepository.getSettings().catch((err) => {
+          console.warn('Failed to load settings repository, using defaults:', err);
+          return DEFAULT_SETTINGS;
+        }),
+        auditRepository.getAll().catch(() => []),
+        getStorageEstimate().catch(() => ({ usedBytes: 0, quotaBytes: 0, percentage: 0 })),
+        syncConfigRepository.getConfig().catch(() => null),
+        syncConflictRepository.getAll().catch(() => []),
       ]);
-      setSettings(currSettings);
-      setAuditEvents(events);
-      setStorageUsage(storage);
+
+      const effectiveSettings = currSettings || DEFAULT_SETTINGS;
+      setSettings(effectiveSettings);
+      setAuditEvents(events || []);
+      setStorageUsage(storage || { usedBytes: 0, quotaBytes: 0, percentage: 0 });
       setSyncConfig(cfg);
-      setConflicts(confl);
-      if (currSettings?.businessName && !cfg) {
-        setEnrollBusinessName(currSettings.businessName);
+      setConflicts(confl || []);
+      if (effectiveSettings.businessName && !cfg) {
+        setEnrollBusinessName(effectiveSettings.businessName);
       }
     } catch (e) {
-      console.error(e);
-      showToast('Failed to load settings', 'error');
+      console.error('Settings loadAll error:', e);
+      setSettings(DEFAULT_SETTINGS);
+      showToast('Loaded default settings', 'info');
     } finally {
       setLoading(false);
     }
@@ -361,10 +367,6 @@ export const SettingsView: React.FC = () => {
       ev.actorName.toLowerCase().includes(q)
     );
   });
-
-  if (loading || !settings) {
-    return <div className="p-8 text-center text-slate-400">Loading settings...</div>;
-  }
 
   return (
     <div className="space-y-6">
