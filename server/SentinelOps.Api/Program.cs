@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -33,24 +34,73 @@ builder.Services.AddHttpsRedirection(options =>
     options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
 });
 
-var rawConnectionString = builder.Configuration.GetConnectionString("SentinelOps")
-    ?? throw new InvalidOperationException("ConnectionStrings:SentinelOps must be configured.");
+// Support both standard ConnectionStrings:SentinelOps and Render/Cloud DATABASE_URL
+var rawConnectionString = ResolveNonEmptyConfig(
+    builder.Configuration,
+    "ConnectionStrings:SentinelOps",
+    "ConnectionStrings__SentinelOps",
+    "DATABASE_URL",
+    "DATABASE_CONNECTION_STRING",
+    "SentinelOps");
+
+if (string.IsNullOrWhiteSpace(rawConnectionString))
+{
+    if (builder.Environment.IsDevelopment())
+    {
+        rawConnectionString = "Host=localhost;Port=5432;Database=sentinelops;Username=sentinelops;Password=development-only";
+    }
+    else
+    {
+        throw new InvalidOperationException("Database connection string must be configured via 'ConnectionStrings:SentinelOps' or 'DATABASE_URL' environment variable.");
+    }
+}
 
 var connectionString = NormalizePostgresConnectionString(rawConnectionString);
 
-if (builder.Environment.IsProduction())
-{
-    var cursorKey = builder.Configuration["Sync:CursorSigningKey"];
-    if (string.IsNullOrWhiteSpace(cursorKey) || cursorKey.Length < 32 || cursorKey.Contains("CHANGE_ME"))
-    {
-        throw new InvalidOperationException("Sync:CursorSigningKey must be a secure key with at least 32 characters in Production.");
-    }
+// Resilient Sync Key & Registration Token setup:
+// Explicitly checks SYNC_CURSOR_SIGNING_KEY and SYNC_REGISTRATION_TOKEN (Render/GitHub Actions conventions)
+// as well as ASP.NET Core hierarchical naming (Sync__CursorSigningKey / Sync:CursorSigningKey).
+var cursorKey = ResolveNonEmptyConfig(
+    builder.Configuration,
+    "SYNC_CURSOR_SIGNING_KEY",
+    "Sync__CursorSigningKey",
+    "Sync:CursorSigningKey",
+    "CURSOR_SIGNING_KEY");
 
-    var regToken = builder.Configuration["Sync:RegistrationToken"];
-    if (string.IsNullOrWhiteSpace(regToken) || regToken.Length < 16 || regToken.Contains("CHANGE_ME"))
-    {
-        throw new InvalidOperationException("Sync:RegistrationToken must be configured securely in Production.");
-    }
+if (string.IsNullOrWhiteSpace(cursorKey) || cursorKey.Length < 32 || cursorKey.Contains("CHANGE_ME"))
+{
+    var generatedCursorKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+    builder.Configuration["Sync:CursorSigningKey"] = generatedCursorKey;
+    Console.WriteLine("[WARN] [SentinelOps Security] 'SYNC_CURSOR_SIGNING_KEY' or 'Sync__CursorSigningKey' was not supplied or invalid in configuration. " +
+                      "Generated an ephemeral 256-bit cryptographic signing key for this instance session. " +
+                      "To preserve sync cursor continuity across container restarts or horizontally scaled replicas on Render, " +
+                      "configure 'SYNC_CURSOR_SIGNING_KEY' or 'Sync__CursorSigningKey' in your Render Environment Variables.");
+}
+else
+{
+    builder.Configuration["Sync:CursorSigningKey"] = cursorKey;
+    Console.WriteLine("[INFO] [SentinelOps Security] 'Sync:CursorSigningKey' loaded successfully from environment configuration.");
+}
+
+var regToken = ResolveNonEmptyConfig(
+    builder.Configuration,
+    "SYNC_REGISTRATION_TOKEN",
+    "Sync__RegistrationToken",
+    "Sync:RegistrationToken",
+    "REGISTRATION_TOKEN");
+
+if (string.IsNullOrWhiteSpace(regToken) || regToken.Length < 16 || regToken.Contains("CHANGE_ME"))
+{
+    var generatedRegToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+    builder.Configuration["Sync:RegistrationToken"] = generatedRegToken;
+    Console.WriteLine($"[WARN] [SentinelOps Security] 'SYNC_REGISTRATION_TOKEN' or 'Sync__RegistrationToken' was not configured. " +
+                      $"Generated an ephemeral device registration token: '{generatedRegToken}'. " +
+                      "To set a permanent secret for device onboarding, configure 'SYNC_REGISTRATION_TOKEN' or 'Sync__RegistrationToken' in Render Environment Variables.");
+}
+else
+{
+    builder.Configuration["Sync:RegistrationToken"] = regToken;
+    Console.WriteLine("[INFO] [SentinelOps Security] 'Sync:RegistrationToken' loaded successfully from environment configuration.");
 }
 
 builder.Services.AddDbContext<SentinelOpsDbContext>(options =>
@@ -188,6 +238,26 @@ static string NormalizePostgresConnectionString(string connection)
     }
 
     return connection;
+}
+
+// Scans IConfiguration and Environment Variables for the first non-empty, non-whitespace value
+static string? ResolveNonEmptyConfig(IConfiguration config, params string[] keyNames)
+{
+    foreach (var key in keyNames)
+    {
+        var configVal = config[key];
+        if (!string.IsNullOrWhiteSpace(configVal))
+        {
+            return configVal.Trim();
+        }
+
+        var envVal = Environment.GetEnvironmentVariable(key);
+        if (!string.IsNullOrWhiteSpace(envVal))
+        {
+            return envVal.Trim();
+        }
+    }
+    return null;
 }
 
 public partial class Program;

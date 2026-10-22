@@ -14,11 +14,14 @@ namespace SentinelOps.Api.Controllers;
 [EnableRateLimiting("sync")]
 public sealed class DeviceController(SentinelOpsDbContext db, IConfiguration configuration) : ControllerBase
 {
+    private string? ExpectedRegistrationToken =>
+        configuration["Sync:RegistrationToken"] ?? configuration["SYNC_REGISTRATION_TOKEN"];
+
     [HttpPost("register")]
     public async Task<ActionResult<RegisterDeviceResponse>> Register(
         RegisterDeviceRequest request, CancellationToken cancellationToken)
     {
-        var expected = configuration["Sync:RegistrationToken"];
+        var expected = ExpectedRegistrationToken;
         var presented = Request.Headers["X-Registration-Token"].ToString();
         if (string.IsNullOrWhiteSpace(expected) ||
             !CryptographicOperations.FixedTimeEquals(
@@ -56,7 +59,7 @@ public sealed class DeviceController(SentinelOpsDbContext db, IConfiguration con
     [HttpPost("{id:guid}/revoke")]
     public async Task<IActionResult> Revoke(Guid id, CancellationToken cancellationToken)
     {
-        var expected = configuration["Sync:RegistrationToken"];
+        var expected = ExpectedRegistrationToken;
         var presented = Request.Headers["X-Registration-Token"].ToString();
         if (string.IsNullOrWhiteSpace(expected) ||
             !CryptographicOperations.FixedTimeEquals(
@@ -75,7 +78,7 @@ public sealed class DeviceController(SentinelOpsDbContext db, IConfiguration con
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<DeviceSummaryDto>>> List(CancellationToken cancellationToken)
     {
-        var expected = configuration["Sync:RegistrationToken"];
+        var expected = ExpectedRegistrationToken;
         var presented = Request.Headers["X-Registration-Token"].ToString();
         if (string.IsNullOrWhiteSpace(expected) ||
             !CryptographicOperations.FixedTimeEquals(

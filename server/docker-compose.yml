@@ -1,19 +1,48 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: sentinelops
-      POSTGRES_USER: sentinelops
-      POSTGRES_PASSWORD: development-only
+      POSTGRES_DB: ${POSTGRES_DB:-sentinelops}
+      POSTGRES_USER: ${POSTGRES_USER:-sentinelops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-development-only}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - sentinelops-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sentinelops -d sentinelops"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinelops} -d ${POSTGRES_DB:-sentinelops}"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 5s
+    networks:
+      - sentinelops-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8080}:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      ConnectionStrings__SentinelOps: Host=postgres;Port=5432;Database=${POSTGRES_DB:-sentinelops};Username=${POSTGRES_USER:-sentinelops};Password=${POSTGRES_PASSWORD:-development-only}
+      DATABASE_URL: postgres://${POSTGRES_USER:-sentinelops}:${POSTGRES_PASSWORD:-development-only}@postgres:5432/${POSTGRES_DB:-sentinelops}
+      Sync__RegistrationToken: ${SYNC_REGISTRATION_TOKEN:-development-only-registration-token}
+      Sync__CursorSigningKey: ${SYNC_CURSOR_SIGNING_KEY:-development-only-cursor-signing-key-minimum-32-chars}
+      Cors__AllowedOrigins__0: ${CORS_ALLOWED_ORIGIN:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - sentinelops-network
 
 volumes:
   sentinelops-postgres:
+
+networks:
+  sentinelops-network:
+    driver: bridge
