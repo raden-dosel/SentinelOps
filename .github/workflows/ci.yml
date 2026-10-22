@@ -38,7 +38,7 @@ jobs:
       - name: Validate Neon database secrets
         env:
           NEON_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
-          NEON_MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
+          NEON_MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING }}
         run: |
           test -n "$NEON_CONNECTION_STRING" || {
             echo "::error::NEON_CONNECTION_STRING is not configured in the production environment."
@@ -52,7 +52,7 @@ jobs:
       - name: Apply migrations to Neon
         shell: bash
         env:
-          MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
+          MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING }}
         run: |
           if [[ -z "${MIGRATION_CONNECTION_STRING//[[:space:]]/}" ]]; then
             echo "::error::NEON_MIGRATION_CONNECTION_STRING is empty or unavailable."
@@ -70,7 +70,7 @@ jobs:
       - name: Verify Neon integration
         run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --no-build --filter "Category=NeonIntegration"
         env:
-          ConnectionStrings__SentinelOps: ${{ secrets.NEON_CONNECTION_STRING }}
+          ConnectionStrings__SentinelOps: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING }}
 
       - name: Validate required Render deployment secrets
         env:
