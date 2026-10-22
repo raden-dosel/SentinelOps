@@ -218,13 +218,34 @@ export function upgradeDatabaseSchema(
 }
 
 let activeDbPromise: Promise<IDBPDatabase> | null = null;
+let lastIndexedDbInstance: any = null;
 
 export function resetDatabaseConnection(): void {
   activeDbPromise = null;
+  lastIndexedDbInstance = null;
 }
 
-export function getDatabase(): Promise<IDBPDatabase> {
+export async function getDatabase(): Promise<IDBPDatabase> {
+  const currentIndexedDb = typeof indexedDB !== 'undefined' ? indexedDB : null;
+  if (currentIndexedDb && lastIndexedDbInstance !== currentIndexedDb) {
+    activeDbPromise = null;
+    lastIndexedDbInstance = currentIndexedDb;
+  }
+
+  if (activeDbPromise) {
+    try {
+      const existingDb = await activeDbPromise;
+      const rawDb: any = (existingDb as any).unwrap ? (existingDb as any).unwrap() : existingDb;
+      if (rawDb?._closed || rawDb?._closing) {
+        activeDbPromise = null;
+      }
+    } catch {
+      activeDbPromise = null;
+    }
+  }
+
   if (!activeDbPromise) {
+    lastIndexedDbInstance = currentIndexedDb;
     activeDbPromise = (async () => {
       const openDbWithVersion = async (version: number): Promise<IDBPDatabase> => {
         return openDB(DB_NAME, version, {
@@ -255,6 +276,13 @@ export function getDatabase(): Promise<IDBPDatabase> {
         db.close();
         db = await openDbWithVersion(nextVersion);
       }
+
+      // Intercept db.close to immediately invalidate cached promise
+      const originalClose = db.close.bind(db);
+      db.close = () => {
+        activeDbPromise = null;
+        return originalClose();
+      };
 
       db.addEventListener('close', () => {
         activeDbPromise = null;

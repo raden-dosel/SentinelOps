@@ -11,12 +11,13 @@ import {
   userRepository,
   syncOutboxRepository,
 } from '../src/storage/repositories';
-import { getDatabase } from '../src/storage/database';
+import { getDatabase, resetDatabaseConnection } from '../src/storage/database';
 import { toCentavos } from '../src/domain/calculations';
 
 describe('Atomic Mutations and Durable Sync Outbox Integration', () => {
   beforeEach(async () => {
     indexedDB = new IDBFactory();
+    resetDatabaseConnection();
     await syncOutboxRepository.clearOutbox();
   });
 
