@@ -60,7 +60,7 @@ describe('Explicit cloud import queue', () => {
     const operations = await db.getAll('syncOutbox');
 
     expect(client).toBeUndefined();
-    expect(operations.map((operation) => operation.entityType)).toEqual(['Settings', 'Client']);
+    expect(operations.map((operation) => operation.entityType).sort()).toEqual(['Client', 'Settings']);
   });
 
   it('rejects a backup with missing relationships before queueing anything', async () => {

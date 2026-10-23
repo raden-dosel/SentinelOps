@@ -55,7 +55,7 @@ if (string.IsNullOrWhiteSpace(rawConnectionString))
     }
 }
 
-var connectionString = NormalizePostgresConnectionString(rawConnectionString);
+var connectionString = PostgresConnectionHelper.Normalize(rawConnectionString);
 
 // Resilient Sync Key & Registration Token setup:
 // Explicitly checks SYNC_CURSOR_SIGNING_KEY and SYNC_REGISTRATION_TOKEN (Render/GitHub Actions conventions)
@@ -215,30 +215,7 @@ static async Task WriteHealthResponse(HttpContext context, HealthReport report)
 }
 
 // Helper to support both standard ADO.NET and Render/Neon postgres:// or postgresql:// URIs
-static string NormalizePostgresConnectionString(string connection)
-{
-    if (string.IsNullOrWhiteSpace(connection)) return connection;
-
-    if (connection.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
-        connection.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
-    {
-        var uri = new Uri(connection);
-        var userInfo = uri.UserInfo.Split(':', 2);
-        var username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
-        var password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
-        var database = uri.AbsolutePath.TrimStart('/');
-        var port = uri.Port > 0 ? uri.Port : 5432;
-
-        var sb = new System.Text.StringBuilder();
-        sb.Append($"Host={uri.Host};Port={port};Database={database};");
-        if (!string.IsNullOrEmpty(username)) sb.Append($"Username={username};");
-        if (!string.IsNullOrEmpty(password)) sb.Append($"Password={password};");
-        sb.Append("SSL Mode=Require;Trust Server Certificate=true;");
-        return sb.ToString();
-    }
-
-    return connection;
-}
+static string NormalizePostgresConnectionString(string connection) => PostgresConnectionHelper.Normalize(connection);
 
 // Scans IConfiguration and Environment Variables for the first non-empty, non-whitespace value
 static string? ResolveNonEmptyConfig(IConfiguration config, params string[] keyNames)

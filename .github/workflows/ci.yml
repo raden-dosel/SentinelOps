@@ -66,6 +66,7 @@ jobs:
         run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --no-build --filter "Category=NeonIntegration"
         env:
           ConnectionStrings__SentinelOps: ${{ secrets.NEON_CONNECTION_STRING }}
+          NEON_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
 
       - name: Validate required Render deployment secrets
         env:
