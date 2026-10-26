@@ -1057,24 +1057,51 @@ export const attachmentRepository = {
   async saveAttachment(record: AttachmentRecord, actorName = 'Admin'): Promise<AttachmentRecord> {
     const db = await getDatabase();
     const tx = safeTransaction(db, ['attachments', 'syncOutbox', 'auditEvents'], 'readwrite');
-    await tx.objectStore('attachments').put(record);
+    const attStore = tx.objectStore('attachments');
+
+    // If sequenceNumber not explicitly provided, allocate atomically within transaction
+    let assignedSequence = record.sequenceNumber;
+    if (assignedSequence === undefined || assignedSequence === null) {
+      const existingRecords = (await attStore.index('entityId').getAll(record.entityId)) as AttachmentRecord[];
+      const entityRecords = existingRecords.filter((a) => a.entityType === record.entityType);
+      const maxSeq = entityRecords.reduce((max, a) => {
+        const seq = typeof a.sequenceNumber === 'number' ? a.sequenceNumber : 0;
+        return seq > max ? seq : max;
+      }, 0);
+      assignedSequence = maxSeq + 1;
+    }
+
+    const finalRecord: AttachmentRecord = {
+      ...record,
+      sequenceNumber: assignedSequence,
+    };
+
+    await attStore.put(finalRecord);
 
     // Outbox metadata (omits raw binary blob to avoid bloating sync feed payloads)
     const metadataPayload: AttachmentMetadata = {
-      id: record.id,
-      entityType: record.entityType,
-      entityId: record.entityId,
-      fileName: record.fileName,
-      fileType: record.fileType,
-      fileSize: record.fileSize,
-      caption: record.caption,
-      uploadedAt: record.uploadedAt,
+      id: finalRecord.id,
+      entityType: finalRecord.entityType,
+      entityId: finalRecord.entityId,
+      fileName: finalRecord.fileName,
+      fileType: finalRecord.fileType,
+      fileSize: finalRecord.fileSize,
+      caption: finalRecord.caption,
+      uploadedAt: finalRecord.uploadedAt,
+      sequenceNumber: finalRecord.sequenceNumber,
+      cloudinaryPublicId: finalRecord.cloudinaryPublicId,
+      cloudinaryUrl: finalRecord.cloudinaryUrl,
+      r2ObjectKey: finalRecord.r2ObjectKey,
+      r2Bucket: finalRecord.r2Bucket,
+      r2FolderName: finalRecord.r2FolderName,
+      etag: finalRecord.etag,
+      storageProvider: finalRecord.storageProvider,
     };
     if (tx.objectStoreNames.contains('syncOutbox')) {
       enqueueOutboxRecord(
         tx.objectStore('syncOutbox'),
         'Attachment',
-        record.id,
+        finalRecord.id,
         'upsert',
         metadataPayload
       );
@@ -1101,7 +1128,7 @@ export const attachmentRepository = {
 
     await tx.done;
     requestSync();
-    return record;
+    return finalRecord;
   },
 
   async deleteAttachment(id: ID, actorName = 'Admin'): Promise<boolean> {

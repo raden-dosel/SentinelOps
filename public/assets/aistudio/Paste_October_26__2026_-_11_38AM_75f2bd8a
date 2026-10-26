@@ -1,0 +1,384 @@
+# Cloudflare Free Plan — R2 Project Image Upload: Feasibility, Refactor & Deployment Guide — Implementation Prompt
+
+**Target coding agent:** AI Studio or Claude Code  
+**Platform:** Cloudflare **Free plan only** (Workers Free, R2 free tier, Pages Free) — no paid plan, no Containers, no Sandbox  
+**Task:** (1) Decide feasibility on the free plan and record it, (2) refactor the code away from anything that needs a paid plan, (3) deliver optional per-project image upload to R2 with the folder/file naming rules below, online-only, and (4) write a full free-plan deployment guide that lists everything the owner must configure manually  
+**Mode:** Audit first → feasibility decision record → refactor plan → build → validate → guide  
+**Primary outputs:** the refactored feature, `DEPLOYMENT_GUIDE.md` (location per repo convention), and the report in Section 13
+
+---
+
+## 1. Role
+
+Act as a Senior Full-Stack Engineer, Cloudflare Platform Engineer (Workers, R2, Pages), PWA/Offline-First Architect, Application Security Engineer, QA Engineer, and Technical Writer.
+
+## 2. Owner Requirements (non-negotiable)
+
+1. **Stay on the Cloudflare free plan.** No paid plan, no feature that requires one. If something needed is not available on the free plan, adjust the design; do not assume the owner will upgrade.
+2. **Images per project, optional.** A project can have zero or more images. Projects must be fully usable without any image.
+3. **Folder name = project name + project start date.** All images of a project live under one folder named from the project's name and start date.
+4. **File name = incrementing number starting from 1.** The first image in a project's folder is `1`, then `2`, `3`, and so on, with the file extension from the validated image type (for example `1.jpg`).
+5. **Online only.** The system must be online to upload. When offline (or when the server cannot be reached), the upload button **and** the image-picking/uploading ability are disabled, with a clear message. There is no offline upload queue.
+
+Example object path in R2:
+
+```
+Main-Lobby-CCTV_2026-10-26/1.jpg
+Main-Lobby-CCTV_2026-10-26/2.png
+Main-Lobby-CCTV_2026-10-26/3.webp
+```
+
+An R2 "folder" is only a key prefix. There is no real directory, and an empty folder does not exist until its first object does.
+
+---
+
+## 3. Feasibility Findings (verify, then record)
+
+These findings were gathered when this prompt was written. Cloudflare changes plans and pricing, so **re-verify each against current Cloudflare documentation** and record the outcome in a Feasibility Decision Record (Section 5). If current documentation disagrees, the documentation wins; say so.
+
+| Capability | Free-plan status found | Consequence |
+|---|---|---|
+| **Cloudflare Containers / Sandbox SDK** (mounting R2 as a filesystem path, persistence across sandbox lifecycles) | **Not available on the free plan.** Containers and Sandbox require the paid Workers plan. | The Sandbox + R2 Mounted Storage design **cannot be used**. It must be removed from the deploy path and replaced. |
+| **R2 object storage** | Has a free tier (about 10 GB storage, 1 million Class A and 10 million Class B operations per month, no egress fees). | Feasible. Plain R2 (no mounting) covers "store images in cloud storage". |
+| **R2 activation** | Commonly requires a **payment method on file** to enable R2 on first use, even to use only the free tier (reported as verification, with no charge while within the free tier). | Must be confirmed. If the owner will not add a payment method, R2 cannot be used; stop and report alternatives instead of silently picking another provider. |
+| **R2 spending cap** | The free tier is a quota, not a hard cap: usage beyond it is billed on pay-as-you-go. | The app must enforce its own limits so it stays inside the free tier (Section 7.7). |
+| **Workers Free limits** | About 100,000 requests/day and 10 ms CPU per request; subrequest and body-size limits apply. | Relevant only if a Worker is used (Option B). Confirm exact limits on the current Workers limits page. |
+| **Docker / container builds** | Only needed for Containers. | No longer needed after refactor; a major simplification. |
+
+Never claim the Sandbox design "works on the free plan". It does not.
+
+---
+
+## 4. Target Architecture on the Free Plan
+
+Use **plain R2 object storage** with a private bucket. Evaluate two options in the audit and choose one; record why.
+
+### Option A — Existing backend issues presigned URLs (preferred when a backend exists)
+
+If the repository already has an API (for example an ASP.NET Core Web API) that is deployed somewhere reachable and can hold server-side secrets:
+
+1. The browser asks the API for upload authorization for a project.
+2. The API authenticates/authorizes, validates type and size, assigns the folder and the next sequence number, and returns a short-lived **presigned `PUT` URL** for the exact object key (SigV4 against `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`, region `auto`, `Content-Type` signed).
+3. The browser `PUT`s the image directly to R2.
+4. The browser asks the API to **finalize**; the API verifies the object in R2 (existence, size, content type, ETag, image header bytes) before recording it.
+5. Viewing uses short-lived presigned `GET` URLs issued by the API after authorization.
+
+This needs **no Cloudflare compute at all**, so Workers Free limits do not apply. It matches any earlier R2 presigned-upload design in the repository; reuse it instead of rebuilding.
+
+### Option B — Cloudflare Worker with an R2 binding (when no suitable backend exists)
+
+If there is no deployed backend that can safely hold secrets, use a Worker on the free plan:
+
+- The Worker has an **R2 binding** (no access keys needed) and exposes authenticated upload/list/read/delete routes.
+- The Worker enforces size and type limits itself, streams the request body into R2, and returns the object key.
+- Measure CPU use against the free 10 ms limit, and confirm daily request limits fit the expected usage. If measured limits do not fit, fall back to Option A or ask the owner.
+
+### Rules for both options
+
+- R2 bucket is **private**: no public bucket access, no development public URL.
+- Browser-direct uploads (Option A) require **bucket CORS** for the exact PWA origin(s).
+- Presigned URLs work only on the S3 API domain, not custom domains; treat them as short-lived bearer tokens and never store or log them.
+- Do **not** use Containers, Sandbox, Durable Objects for storage, Docker, or `S3Mount`/`mountBucket()` for this feature.
+
+---
+
+## 5. Mandatory Workflow
+
+### Phase A — Read-only audit (no edits)
+
+Inspect the whole repository. Never invent file paths, names, scripts, or versions; confirm each in the code.
+
+| ID | Inspect | Why |
+|---|---|---|
+| **A1** | Frontend project module: project entity (name, start-date field and its storage format), attachment/image types, repositories, UI | Where naming, sequencing, and the online-only UI plug in |
+| **A2** | Existing connectivity logic (online/offline hooks, API health check) | Reuse; avoid duplicate listeners |
+| **A3** | Backend/API (if any): project and attachment persistence, auth model, deployment target, existing R2/S3 code, health endpoints | Chooses Option A vs B |
+| **A4** | Any Sandbox/Containers/`S3Mount`/`mountBucket` code, Dockerfile, `containers` or Durable Object migration config in Wrangler, related scripts and docs | Must be removed or isolated for the free plan |
+| **A5** | Wrangler configuration, Pages configuration, CI files, environment-variable conventions, `.gitignore` handling of `.dev.vars`/`.env*` | Deployment path and secret hygiene |
+| **A6** | Existing image/attachment data (local Blobs, any already-uploaded R2 objects with older opaque keys) | Backward compatibility; no silent renaming |
+| **A7** | Existing R2 usage, buckets, tokens, CORS, and other Cloudflare features | Avoid breaking or sharing credentials |
+| **A8** | Tests, linting, build setup, package manager | How to verify |
+| **A9** | Multi-tenancy: whether data is scoped by business/organization/user | Folder collisions and authorization |
+
+### Phase B — Feasibility Decision Record
+
+Before changing code, produce:
+
+1. Findings table from Section 3 with the verification result and source for each row.
+2. Which option (A or B) you chose and why.
+3. List of existing code/config that depends on a paid feature (from A4).
+4. Owner decisions needed (for example payment-method requirement for R2, multi-tenant folder scope, handling legacy images).
+
+If R2 itself turns out to be unavailable without a payment method the owner refuses, stop and report. Do not substitute another provider unasked.
+
+### Phase C — Refactor and build
+
+Implement in this order, checking after each step:
+
+1. Remove or isolate paid-plan dependencies from the deploy path (Section 8).
+2. Naming, sequencing, and storage-key logic (Section 7.1–7.2).
+3. Online-only gating UI (Section 7.3).
+4. Upload, finalize, view, delete flows (Section 7.4–7.6).
+5. Free-tier guardrails (Section 7.7).
+6. Security (Section 7.8).
+
+### Phase D — Verify
+
+Run the tests and checks in Section 10. Prove the behavior; do not assume it.
+
+### Phase E — Write and validate `DEPLOYMENT_GUIDE.md`
+
+Follow Section 9. Verify every command and name against the repo and current Cloudflare docs; mark each step verified or unverified.
+
+---
+
+## 6. Short-Circuit and Safety Rules
+
+- If the repository already contains a verified plain-R2 implementation matching these requirements, do not rebuild it. Report evidence and implement only the gaps.
+- Do **not** deploy, run `wrangler deploy`, create or modify cloud resources, change secrets, or write to a real bucket without explicit owner authorization. Writing code and the guide is the task; deploying is the owner's decision.
+- Never commit or print credentials, presigned URLs, account IDs, or tokens.
+
+---
+
+## 7. Functional Requirements
+
+### 7.1 Folder naming: project name + start date
+
+Folder name format:
+
+```
+{ProjectName}_{StartDate}
+```
+
+- **ProjectName:** the project's name, sanitized to a safe, URL-friendly slug: Unicode normalized (NFKC); whitespace to single hyphens; only letters, digits, hyphen, underscore, and dot kept; characters unsafe in keys or URLs, path separators, `..`, and control characters removed; leading/trailing dots and hyphens trimmed; repeated separators collapsed; length bounded (for example 60 characters); reserved or empty results replaced by a fixed fallback such as `Project`. Prefer ASCII-safe keys so presigned-URL signing never depends on encoding quirks; the human-readable name stays in the database.
+- **StartDate:** the project's start date as `YYYY-MM-DD`, formatted directly from the stored date-only value. **Do not convert through UTC** (`new Date(...).toISOString()`), because users in UTC+8 can get a date shifted by a day. If the start date is missing or invalid, use a fixed placeholder such as `undated`, never today's date, and surface it in the UI.
+- Implement one shared, unit-tested helper (for example `buildProjectFolderName`) used by every code path.
+
+**Folder immutability.** Assign the folder name at the project's **first** image upload and store it on the project (or attachment) record. Later project renames or start-date edits do **not** move existing objects, because R2 has no rename (a move is copy + delete and costs write operations). The human-facing display name may follow the project's current name. If the owner wants folders to follow renames, propose a separately approved "reorganize folder" operation; do not build it silently.
+
+**Collisions.** Two projects can share a name and start date. Detect this server-side (or in the single authoritative store) when assigning a folder, and make the second one unique by appending a deterministic suffix (`_2`, `_3`), recorded on the project. Never let two projects write into the same folder. In a multi-tenant repo, add an opaque, non-PII scope prefix above the folder (for example the business ID) and document it; propose this as an owner decision if the audit shows multiple businesses share the bucket.
+
+### 7.2 File naming: incrementing number from 1
+
+Full object key:
+
+```
+[{scope}/]{ProjectFolder}/{N}.{ext}
+```
+
+- `N` starts at **1** per project folder and increases by one for each image added.
+- `ext` comes from the validated image type (`jpg`, `png`, `webp`), never from the user's original filename.
+- Numbers are **never reused** after a delete; gaps are acceptable and avoid collisions.
+- Assign `N` **atomically** at upload authorization, inside the authoritative store (for example a per-project counter in the database, or a counter in the same IndexedDB transaction if no server store exists). Reading the bucket's current maximum and adding one is race-prone and costs list operations; avoid it as the primary method.
+- For a multi-image selection, assign consecutive numbers in selection order **before** uploads begin.
+- A retried upload **reuses** its assigned number; it never consumes a new one. An abandoned upload leaves a gap.
+- Resolve multi-device number collisions deterministically (for example, the server assigns numbers, so devices cannot collide); never overwrite another image silently.
+- Store `N`, the full object key, the folder, content type, size, ETag, and timestamps on the attachment record. Do not store presigned URLs.
+
+### 7.3 Online-only gating (UI and logic)
+
+States (adapt names to the repo's conventions): `checking`, `offline`, `server-unreachable`, `ready`, plus operation states `uploading` and `error`.
+
+- Use the browser online/offline events and `navigator.onLine` as a **hint only**, plus a real reachability check against the configured API (or Worker). `navigator.onLine === true` does not prove the server is reachable.
+- Re-check on `online` events, view mount/foreground, and explicit retry; bounded timeout; no tight polling; make sure a service worker cannot satisfy the check from cache.
+- **Offline:** the **Upload** button is disabled and the file picker/drop target cannot be used. Show accessible text (not color alone): **"No internet connection. Connect to the internet to upload project images."**
+- **Online but server unreachable:** disable the same controls and show: **"SentinelOps server is unreachable. Image uploads are temporarily unavailable. Check your connection and try again."** (Use the product name found in the repo.)
+- **Checking:** keep controls disabled with a neutral "Checking connection…" message.
+- Use proper `disabled` semantics, focus handling, and an `aria-live` region for status changes.
+- **No offline queue.** Do not accept a file and upload it later. If connectivity drops **mid-upload**, show a clear failure with a retry; never mark an image uploaded without finalization.
+- Do not disable unrelated project editing, notes, or other offline features. Existing already-saved local attachments remain viewable. If the repository has an existing **local-only** attach path, report it and ask whether it should also be disabled; do not remove it unasked.
+- Images are optional: no project form validation may require an image.
+
+### 7.4 Upload flow
+
+1. User selects one or more images (within configured count/size limits).
+2. Client-side checks for feedback: allowed types (JPEG, PNG, WebP), non-empty, size, count. Server-side checks are the real boundary.
+3. **Compress/resize on the client before upload** where it preserves usefulness (for example longest side about 1600 px, quality about 0.8), so the 10 GB free storage lasts. Keep the original only if the owner requires it; make the setting configurable.
+4. Request authorization (Option A) or call the Worker (Option B); receive folder, number, and target.
+5. Upload with `PUT` (raw `File`/`Blob`, not `FormData`), exact signed `Content-Type`. Show per-file progress (for example via `XMLHttpRequest` upload progress). Limit concurrency (2–3).
+6. **Finalize**: server verifies the stored object (exists, size matches and within limit, content type approved, ETag recorded, magic bytes match an image format). Only then is the attachment `uploaded`.
+7. Persist the attachment metadata locally and sync it through the repo's existing mechanism.
+8. Report per-file success/failure; preserve successful uploads when others fail; allow retry per file; prevent duplicate submissions.
+9. Handle "R2 succeeded but finalize/local save failed": surface the incomplete state with a recovery path; do not claim success; do not auto-delete.
+
+Presigned `PUT` cannot reliably cap size before the upload, so the **finalize check is the authoritative size/type gate**. Reject and server-side delete objects that fail verification.
+
+### 7.5 Viewing
+
+- Images are private. The API (Option A) or Worker (Option B) issues a short-lived `GET` after authorizing the user for that project; never expose the bucket publicly.
+- Use lazy loading and the compressed image sizes; R2 provides no image transformation. If thumbnails are desired, generate small ones client-side at upload and store them as separate numbered objects only with owner approval (they count toward storage and operations).
+- Show the file name (`N.ext`) and the folder in an accessible way. Downloads default to `N.ext`; if the owner wants the folder name in the download name, propose a `Content-Disposition` setting.
+
+### 7.6 Deleting
+
+- Deletion is server-authorized and server-executed (or via the Worker's binding), never by exposing delete credentials to the browser.
+- Delete the object and the attachment record; do not reuse the number.
+- Deletion works only when online; the delete control follows the same online-only gating.
+
+### 7.7 Free-tier guardrails (the plan has no hard cap)
+
+Because overage is billed rather than blocked, the application must keep usage inside the free tier by design:
+
+- Configurable limits: maximum file size (default modest, for example a few MB after compression), maximum images per project, allowed types.
+- A **global storage budget guard**: track total uploaded bytes in the authoritative store and refuse new uploads above a configurable soft cap below the free storage allowance (for example around 80%). Show a clear message when reached.
+- Minimize operations: one upload = one write; avoid list-heavy designs; do not poll R2; use the counter instead of listing to assign numbers; never run background loops against R2.
+- Add monitoring guidance (Section 9): R2 usage view and billing/usage notifications to enable manually.
+- Document that exceeding the free tier would incur charges, and that the owner controls that through limits and alerts.
+
+### 7.8 Security
+
+- R2 API token (Option A) scoped to the **single bucket** with **Object Read & Write** only; separate tokens for production and staging. Option B uses a binding and needs no access keys.
+- Secrets only as server-side secrets; never `VITE_`/public variables, source, logs, browser storage, or the guide.
+- Authenticate and authorize every request: the caller must be allowed to act on the **specific project**; never accept a client-supplied bucket, key, folder, or number.
+- Validate type and size server-side; verify objects at finalization; enforce rate limits on authorization endpoints.
+- Presigned URLs: short expiry (for example 5–10 minutes), single object, signed `Content-Type`, never logged or stored.
+- **Privacy note to document:** unlike an opaque-ID scheme, this naming puts the project name and start date in the object key. The bucket is private, but keys are visible to anyone with bucket access and in storage tooling. Record this trade-off and avoid placing client names or addresses in project names if that is a concern.
+
+---
+
+## 8. Refactor: Removing Paid-Plan Dependencies
+
+From audit A4:
+
+- **Remove from the deploy path immediately** anything that makes a free-plan deploy fail or requires a paid plan: Wrangler `containers` configuration, container image/Dockerfile references, Durable Object bindings/migrations that exist only for the Sandbox class, the Sandbox exports, `S3Mount`/`mountBucket()` usage, and scripts that build or push container images.
+- Keep git history intact. Make the removal a **separate, clearly described commit/patch**.
+- Delete substantive Sandbox source files only after confirming nothing else imports them. If unsure, move them out of the build and list them for owner approval to delete.
+- Remove or rewrite docs that tell users to mount R2 as a filesystem or that require Docker/Containers, and replace them with the plain-R2 design. Mark superseded documents as superseded rather than leaving contradictory instructions.
+- Keep any unrelated Durable Object or Worker functionality that does not depend on Containers.
+- Do not change unrelated features, routes, or data formats. Preserve existing stored images and keys: existing objects with older opaque keys keep working because the object key is stored per attachment; only **new** uploads use the folder/number scheme.
+
+---
+
+## 9. `DEPLOYMENT_GUIDE.md` Requirements (Free Plan)
+
+Write for an owner who can follow instructions but is not assumed to know Cloudflare. Use numbered steps with an expected result after each, placeholders in angle brackets, never real secrets, and label each action as **dashboard**, **terminal**, **edit a file**, or **CI**. Mark each step Verified (executed), Verified (read from code/docs), or Unverified.
+
+Required order:
+
+1. **Overview and architecture** (Option A or B chosen, and why; what was removed).
+2. **Manual Configuration Checklist** at the top, as a table: `# | Item | Where | Secret? | Verify with`, in execution order, matching the procedure exactly.
+3. **Prerequisites** with check commands.
+4. **Prepare Cloudflare resources.**
+5. **Configure the repository.**
+6. **Set secrets.**
+7. **Local test.**
+8. **Deploy.**
+9. **Post-deploy verification** (real upload test with cleanup).
+10. **Free-tier monitoring and cost safety.**
+11. **Security checklist.**
+12. **Operations** (logs, updates, token rotation).
+13. **Rollback and teardown.**
+14. **Troubleshooting table.**
+15. **Open items and limitations.**
+
+### 9.1 Seed list of manual steps (confirm, correct, extend against the audit)
+
+1. **Cloudflare account on the Free plan.** Create/verify the account; confirm no paid plan is selected.
+2. **Activate R2.** Dashboard → R2. Expect a prompt for a payment method; verify current behavior and tell the owner plainly that this is needed to enable R2 and that charges only occur if usage exceeds the free tier. Owner decision point.
+3. **Create a private R2 bucket** (production), and optionally a separate test bucket. Choose location/jurisdiction (confirm whether it can change later). Keep public access and any development public URL **off**.
+4. **Find the Account ID** (used in the S3 endpoint `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`).
+5. **Option A only: create an R2 API token** with **Object Read & Write**, scoped to the single bucket; copy the Access Key ID and Secret Access Key (shown once); separate production/staging tokens.
+6. **Option A only: set backend secrets** with the exact names the code reads (for example `R2__AccountId`, `R2__BucketName`, `R2__AccessKeyId`, `R2__SecretAccessKey`) in the API host's secret store, not in the frontend.
+7. **Option B only: Wrangler setup** — install Wrangler, authenticate (`wrangler login`), create the Worker config with the R2 binding, set an auth secret with `wrangler secret put`, confirm the free `workers.dev` subdomain.
+8. **Bucket CORS** (Option A): exact PWA origin(s), `PUT` plus `GET`/`HEAD` as used, and the request headers the client sends (such as `Content-Type`). No wildcard origins in production.
+9. **R2 lifecycle rule (recommended):** abort incomplete multipart uploads (relevant if multipart is ever used). Verify current rule syntax.
+10. **Frontend hosting (Cloudflare Pages Free or existing host):** set the public API base URL environment variable only; rebuild and redeploy. Never set secrets here.
+11. **Backend CORS** for the PWA origin on the API itself.
+12. **Free-tier safeguards in the dashboard:** open the R2 usage view; enable billing/usage notifications if available; note there is no hard spending cap.
+13. **Application limits:** set the configurable max file size, max images per project, and storage soft cap values.
+14. **Post-deploy test:** upload to a disposable test project, confirm key shape `Folder/1.ext`, confirm second image is `2.ext`, view, delete, confirm offline gating, clean up test data.
+15. **Token rotation and teardown plan** documented.
+
+Do not tell the owner to install Docker for this design. Docker was needed only for Containers.
+
+### 9.2 Minimum troubleshooting coverage
+
+R2 not activated or payment step blocked; permission denied (token scoped to a different bucket); `SignatureDoesNotMatch` (content-type mismatch or clock/endpoint error); browser upload blocked by CORS; expired presigned URL (the browser cannot read the error body; request a fresh URL and retry); images missing after a project rename (folder is immutable by design); folder collision suffix explained; upload disabled unexpectedly (offline vs server-unreachable states); storage guard reached; Worker CPU or daily request limit (Option B).
+
+---
+
+## 10. Required Tests
+
+Use the repository's existing tooling; add a minimal amount of new tooling only if essential.
+
+- **Folder name helper:** spaces, Unicode, path separators, `..`, reserved characters, empty result, very long names, missing/invalid start date (placeholder, never today), and **no date shift in UTC+8**.
+- **Collision handling:** two projects with the same name and start date get distinct folders; neither overwrites the other.
+- **Sequence numbers:** first image is `1`; increments by one; per project; consecutive in selection order; retries reuse the number; deletions never free a number; two rapid uploads never share a number; multi-device case resolved deterministically.
+- **Object key:** matches `[{scope}/]{Folder}/{N}.{ext}`; extension from validated type, not the user's filename.
+- **Online-only gating:** offline disables the upload button and the picker and shows the exact message; server-unreachable state shows its own message; `online` event triggers a re-check rather than instantly enabling; mid-upload disconnect produces a failure with retry and no false success; no queue exists.
+- **Optional images:** a project can be created, edited, and used with zero images.
+- **Upload pipeline** (mock R2 or a disposable test bucket): valid single and multiple uploads; invalid type, empty file, oversize, too many files rejected; mismatched `Content-Type` rejected; finalize rejects missing, zero-byte, oversized, wrong-type, and non-image objects; partial batch failure preserves successes.
+- **Security:** unauthorized and wrong-project requests rejected; client-supplied key/bucket/folder/number ignored; secrets absent from bundles, responses, storage, and logs; presigned URLs not persisted.
+- **Free-tier guards:** per-project count limit, file-size limit, and storage soft cap block further uploads with clear messages.
+- **Refactor safety:** the build and (where possible) a dry deploy configuration check no longer reference Containers/Sandbox; legacy attachments with older keys still render.
+
+Run lint, type checks, unit tests, and the build with the repo's package manager. Never claim a check passed unless it was executed and the result inspected. If an environment lacks tooling, mark the check Unverifiable and give the exact commands.
+
+---
+
+## 11. Change Protection
+
+- Make focused, minimal patches. Preserve all existing, working features and the offline-first architecture.
+- Do not silently change routes, schemas, environment-variable names, authentication, or sync semantics. Extend the attachment model minimally (folder, number, key, status) and update sync contracts and tests deliberately.
+- Do not reuse an existing bucket, prefix, or token that belongs to another feature without owner approval.
+- If a required change would break an approved feature, stop that change, explain the conflict, and ask. Continue independent work.
+- Separate commits/patches for: (1) paid-dependency removal, (2) naming/sequence logic, (3) UI gating, (4) upload/view/delete flow, (5) guardrails, (6) docs.
+
+---
+
+## 12. Acceptance Criteria
+
+- [ ] Feasibility Decision Record exists and states plainly that Containers/Sandbox are not usable on the free plan.
+- [ ] No Containers, Sandbox, Docker, or paid-plan dependency remains in the deploy path.
+- [ ] Images are optional per project; projects work with zero images.
+- [ ] Folder name is `{ProjectName}_{StartDate}` (sanitized), assigned at first upload, unique per project, and immutable afterward.
+- [ ] Image file names are `1`, `2`, `3`… with the validated extension, per project, never reused, stable across retries.
+- [ ] Start date uses the stored date-only value with no timezone shift; missing date uses a fixed placeholder.
+- [ ] Upload button and picker are disabled when offline or when the server is unreachable, with the specified messages; there is no offline upload queue.
+- [ ] Bucket is private; images are viewed only through short-lived authorized access.
+- [ ] R2 token is bucket-scoped, Object Read & Write only (Option A), and no secret is exposed to the browser, repo, logs, or guide.
+- [ ] Finalization verifies each uploaded object before it is marked uploaded.
+- [ ] Free-tier guardrails (size, count, storage soft cap, compression) are implemented and tested.
+- [ ] The privacy trade-off of names in object keys is documented.
+- [ ] `DEPLOYMENT_GUIDE.md` has the Manual Configuration Checklist at the top, matches the procedure, and every step is labeled verified or unverified.
+- [ ] Existing features and legacy attachments were not broken or silently renamed.
+- [ ] No deployment or cloud-resource change was made without owner authorization.
+
+Do not mark any criterion complete without implementation evidence or an executed test.
+
+---
+
+## 13. Required Delivery Report
+
+1. **Feasibility Decision Record** — findings, sources, chosen option, owner decisions needed.
+2. **Audit summary** — architecture found, paid-plan dependencies found, and where.
+3. **Files changed** — each with its purpose, grouped by the commits in Section 11.
+4. **Naming behavior** — helper, sanitization, start-date handling, collision rule, immutability, sequence assignment, and legacy handling.
+5. **Online-only behavior** — state machine, reachability check used, and what is disabled in each state.
+6. **Upload, view, and delete flows** — including finalization and error recovery.
+7. **Free-tier guardrails** — configured values and how limits are enforced.
+8. **Security and privacy** — authorization, token scope, secret handling, and the naming/privacy trade-off.
+9. **Tests and commands** — what ran, passed, failed, and could not be run.
+10. **Manual Configuration Checklist** — repeated in short form.
+11. **Unverified items and remaining limitations** — including R2 payment-method requirement, lack of a hard spending cap, no image transformation on R2, and Worker free-tier limits if Option B is used.
+12. **Recommended deployment order.**
+
+### Final directive
+
+Deliver the smallest correct change that meets the five owner requirements on the free plan. Be honest about what the free plan cannot do, never assume an upgrade, and prefer a guide with fewer steps that are fully verified over a longer one with guesses.
+
+---
+
+## Official References
+
+Re-read before implementing; the documentation is the authority if it differs from this prompt.
+
+- Containers pricing (plan requirement): https://developers.cloudflare.com/containers/pricing/
+- Workers pricing (free vs paid limits): https://workers.cloudflare.com/pricing
+- R2 pricing and free tier: https://developers.cloudflare.com/r2/pricing/
+- R2 presigned URLs: https://developers.cloudflare.com/r2/api/s3/presigned-urls/
+- R2 CORS configuration: https://developers.cloudflare.com/r2/buckets/cors/
+- R2 API tokens: https://developers.cloudflare.com/r2/api/tokens/
+- R2 S3 API compatibility: https://developers.cloudflare.com/r2/api/s3/api/
+- Workers limits: https://developers.cloudflare.com/workers/platform/limits/
+- MDN — `Navigator.onLine`: https://developer.mozilla.org/en-US/docs/Web/API/Navigator/onLine

@@ -1,0 +1,331 @@
+# Cloudflare Sandbox + R2 Mounted Storage — Implementation Prompt
+
+**Target coding agent:** GitHub Copilot Agent or Claude Code  
+**Platform:** Cloudflare Workers, Durable Objects, Containers / Sandbox SDK (`@cloudflare/sandbox`), Cloudflare R2  
+**Scope:** Mount R2 buckets as filesystem paths inside a sandbox, persist data across sandbox lifecycles, and work with the mounted storage using standard file operations  
+**Mode:** Full audit first → written audit list of what must be developed → build → verify with evidence
+
+---
+
+## 1. Role
+
+Act as a Senior Cloudflare Platform Engineer, Sandbox SDK / Containers Specialist, R2 and S3-Compatible Storage Engineer, Application Security Engineer, and QA Engineer.
+
+Deliver a working, verified implementation of three capabilities. Do not treat copying a documentation snippet, or a configuration file that merely mentions R2, as a finished feature.
+
+## 2. Objective
+
+Implement and verify these three capabilities, in this order of dependency:
+
+1. **Mounting R2 buckets as filesystem paths.** A sandbox can see an R2 bucket (or a prefix of one) as a normal directory such as `/data` or `/mnt/artifacts`.
+2. **Automatic data persistence across sandbox lifecycles.** Data written to the mounted directory survives the sandbox being stopped, destroyed, or recreated; the next sandbox that mounts the same bucket and prefix finds the data without any manual save or restore step.
+3. **Working with mounted storage using standard file operations.** Code and commands running in the sandbox (`cat`, shell redirection, Python `open()`, the SDK's file API where available) read and write the mounted directory like any other path, with the known differences from a local disk handled deliberately.
+
+"Fulfilled" means each capability is implemented **and** proven by an executed test or recorded run. Absence of evidence means not fulfilled.
+
+---
+
+## 3. Mandatory Workflow
+
+### Phase A — Read-only audit (no edits)
+
+Inspect the repository completely before changing anything. Then produce the written **Audit Report** described in Section 4. Do not invent file paths, class names, binding names, or versions; confirm each one in the code.
+
+### Phase B — Feature development plan
+
+From the audit, produce the **Feature Development List** (Section 5): only the items marked `Missing`, `Partial`, `Broken`, or `Unverified`. Show it before editing code.
+
+### Phase C — Build
+
+Implement the list in the stated order with small, focused patches. After each feature, run its checks before moving on.
+
+### Phase D — Verify and report
+
+Run the persistence proof (Section 8), the test suite, and the build. Deliver the report in Section 11.
+
+### Short-circuit rule
+
+If the audit proves all three capabilities are already implemented **and** verified, do not rebuild anything. Report the evidence and implement only missing tests, documentation, or hardening items.
+
+---
+
+## 4. Phase A — Audit Specification
+
+### 4.1 Platform version check (do this first)
+
+Cloudflare documents two generations of the Sandbox SDK, and the mounting API differs between them. Determine which one the repository uses and record the evidence (`package.json`, lockfile, imports, Dockerfile base image tag).
+
+| | **Sandbox SDK 0.x** | **Sandbox SDK 1.0** |
+|---|---|---|
+| Mount call | `sandbox.mountBucket(bucket, mountPath, options)`; `sandbox.unmountBucket(mountPath)` | `S3Mount` class: `mounts.mount({...})`, `inspect()`, `unmount()` inside your Durable Object |
+| R2 access | Worker R2 binding (omit `endpoint`), local-dev `localBucket: true`, or remote S3 endpoint with credentials | **S3-compatible endpoint only**: `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`, region `auto`, R2 API token. `S3Mount` does not accept an R2 binding |
+| Credentials | Environment variables or explicit options | Held by your Worker; an `S3Gateway` entrypoint signs requests so the sandbox never receives real credentials |
+| Container image | Sandbox base image | Image must contain `fuse3`, `s3fs`, and the `sandbox-shim` binary |
+
+Rules:
+
+- **Existing app on 0.x:** implement with the 0.x API. Do not migrate to 1.0 without explicit owner approval; if migration seems beneficial, report it as a recommendation.
+- **Existing app on 1.0:** use `S3Mount`.
+- **No Sandbox SDK present yet:** Cloudflare's documentation directs new applications to the 1.0 pattern. Use it unless the owner chooses otherwise.
+- Cloudflare's documentation changes. Re-read the current pages listed in "Official References" before relying on any API shape in this prompt, and prefer the documentation over this prompt if they disagree.
+
+### 4.2 Audit checklist
+
+Fill in every row. Use only these statuses, with file/line evidence for each:
+
+- `Present-Verified` — implemented and proven by an executed test or run.
+- `Present-Unverified` — code exists, no proof it works.
+- `Partial` — incomplete, or covers only some cases.
+- `Missing` — not implemented.
+- `Broken` — implemented but failing or incorrect.
+- `Conflict` — cannot be done without breaking an existing feature (explain; see Section 6).
+- `Unverifiable` — cannot be checked in this environment (state why, e.g. Docker or Cloudflare account not available).
+
+| ID | Audit item | What to look for |
+|---|---|---|
+| **A1** | SDK package and generation | Package name, version, imports, docs generation (0.x vs 1.0) |
+| **A2** | Worker, Durable Object, and container wiring | Wrangler config, Durable Object class, container binding, scheduling policy, compatibility flags (`nodejs_compat` for 1.0), entrypoint exports |
+| **A3** | Container image | Dockerfile; `fuse3`, `s3fs`, `sandbox-shim` (1.0) or the correct Sandbox base image (0.x); image tag matches package version |
+| **A4** | R2 bucket and access configuration | Bucket name, endpoint/variables, binding (0.x), secrets declaration, `.dev.vars` / local-dev setup |
+| **A5** | R2 credentials and scope | Token type, permission level, bucket scope, where secrets are stored; any secret committed to the repo |
+| **B1** | Mount implementation | Actual `mountBucket()` / `S3Mount.mount()` call sites |
+| **B2** | Mount path and prefix design | Chosen `mountPath`, `keyPrefix`/`prefix`, validity (absolute, normalized, not `/`, no overlap with reserved paths) |
+| **B3** | Access mode | `read-only` vs `read-write` chosen per use case |
+| **B4** | Mount idempotency and conflicts | Safe repeat calls, handling of existing/conflicting mounts |
+| **B5** | Unmount / shutdown flow | `unmount()` before destroy, handling of busy mounts, ordering after writers finish |
+| **B6** | `S3Gateway` export (1.0) / `ContainerProxy` or other required exports (0.x) | Re-export from the Worker main module; not exposed to HTTP routing |
+| **C1** | Persistence key strategy | How data maps to bucket + prefix (per job, user, tenant, or project); stable and non-colliding |
+| **C2** | Destroy-and-recreate behavior | Code path that stops/destroys the sandbox, and a new sandbox that remounts the same prefix |
+| **C3** | Persistence proof | Any test or script showing write → destroy → recreate → read |
+| **C4** | Boundary of persistence | Documentation/code that makes clear only the mounted path persists; `/workspace` and other local disk paths do not; snapshots exclude mounted directories |
+| **D1** | Standard file operations used | `exec`, shell commands, Python `open()`, SDK file API where available |
+| **D2** | Handling of object-storage semantics | Rename = copy + delete; no file locks, hard links, ownership, permissions, or atomic replace; directories come from key prefixes |
+| **D3** | Metadata cache behavior | `s3fs` cache (default 900 s) and any `stat_cache_expire` / `disable_noobj_cache` tuning |
+| **D4** | Write pattern safety | Working/temporary files on local disk; final results written to the mount; handling of interrupted writes |
+| **E1** | Authentication of callers | Routes that run jobs or read results are authenticated and authorized |
+| **E2** | Input validation | Job/sandbox/prefix names validated (for example against a strict lowercase-alphanumeric-hyphen pattern); no path traversal |
+| **E3** | Isolation between tenants/jobs | Separate prefixes or sandboxes; no cross-tenant mount |
+| **E4** | Secret handling | Secrets only in Worker secrets; not in logs, responses, sandbox env, or source |
+| **F1** | Error handling | Typed handling of mount errors (for example `SandboxS3MountError.is(error)` rather than `instanceof` in 1.0), `BucketAccessError` / `InvalidMountPointError` in 0.x |
+| **F2** | Diagnostics | Use of `inspect()` (1.0) before retrying; structured logs without secrets |
+| **G1** | Local development | Documented, working local setup (for example MinIO + `.dev.vars` in 1.0, or `localBucket: true` in 0.x) and Docker/FUSE requirements |
+| **H1** | Automated tests | Unit/integration tests for mount helpers, validation, and error mapping |
+| **H2** | End-to-end test | Test or script covering the persistence flow against a disposable bucket/prefix |
+| **I1** | Documentation | Setup, configuration names, deployment, operations, limits |
+| **J1** | Existing-feature impact | Any other R2 usage, bindings, buckets, or tokens that this work could affect |
+
+### 4.3 Audit Report output
+
+Before building, output:
+
+1. SDK generation and evidence.
+2. The completed checklist table above with status and evidence per row.
+3. A one-paragraph conclusion for each of the three capabilities: **fulfilled / partially fulfilled / not fulfilled**, with the deciding evidence.
+4. Architectural conflicts and risks.
+5. Items that cannot be verified in the current environment and why.
+
+---
+
+## 5. Feature Development List
+
+Derive this list from the audit. Include only gaps. Keep the IDs so the final report can map back to the audit.
+
+### F1 — Mount R2 as a filesystem path
+
+- Add or complete the container image requirements (1.0: `fuse3`, `s3fs`, `sandbox-shim` copied from the `cloudflare/sandbox` image whose tag matches the installed `@cloudflare/sandbox` version).
+- Add or complete Wrangler configuration: bucket name and endpoint as variables, credentials declared as required secrets, container image, Durable Object scheduling policy, and `nodejs_compat` where required. Run the repository's type generation (for example `wrangler types`) after changing bindings.
+- Export what the SDK needs from the Worker main module (`S3Gateway` in 1.0; confirm any 0.x requirements in the Storage API reference).
+- Implement one small, reusable mount helper that:
+  - Starts the container if it is not running (1.0: `S3Mount` does not start or stop the container), with an inactivity timeout, and with outbound internet disabled unless the job needs it.
+  - Mounts the bucket or prefix at a validated path.
+  - Sets `access` (1.0) or `readOnly` (0.x) deliberately: default to read-only when a job only reads.
+  - Passes `region: "auto"` and the R2 account endpoint `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` for the S3-endpoint modes.
+  - Is safe to call repeatedly with the same settings, and surfaces a conflict clearly when settings differ.
+  - In 1.0, calls `mount()` **before** any `interceptAllOutboundHttp()` call, because otherwise storage requests are swallowed and the mount fails.
+- Implement the shutdown path: stop writers, `unmount()`, then destroy the sandbox. If `unmount()` reports the path is busy, stop the process and retry; never force it, and never destroy with active writers.
+
+### F2 — Automatic persistence across sandbox lifecycles
+
+- Define the persistence key strategy: which bucket and which prefix a given job/user/project maps to. It must be stable across sandbox restarts and unique per isolation boundary (for example `jobs/<validated-job-id>`).
+- Make recreation automatic: every sandbox start for a given key calls the mount helper before running work, so no manual restore step exists.
+- Keep sandbox names/prefixes per logical job. In 1.0, each *new* mount configuration adds an outbound intercept, `unmount()` does not remove it, and a container accepts a limited number of intercepts (documented as 64). Do not mount many different prefixes into one long-lived instance; give each job its own sandbox name.
+- Document and enforce the boundary of persistence: only data under the mounted path persists. Local-disk paths (for example `/workspace` or `/tmp`) do not, and snapshots do not include mounted directories. If the project also needs a persistent working directory, point to Cloudflare's backup/restore or snapshot features as a separate, owner-approved feature rather than silently adding it.
+
+### F3 — Standard file operations on the mount
+
+- Provide thin, tested wrappers (or documented usage) for reading and writing the mounted path using ordinary tools: shell commands, Python file I/O, and the SDK file API where the SDK generation provides one.
+- Handle object-storage semantics deliberately:
+  - **Rename** copies the object and deletes the original; do not rely on rename for atomic publish.
+  - **No locks, hard links, ownership, permissions, or atomic replace** as on a local disk; do not build logic that depends on them.
+  - **Metadata cache:** `s3fs` caches file metadata, including "file does not exist", for 900 seconds by default, so a file added or changed by another client can appear missing or stale in the sandbox. Where freshness matters, set a lower `stat_cache_expire` and/or `disable_noobj_cache: true` through `s3fsOptions`, and document the trade-off. Do not pass options the SDK forbids (endpoint, credentials, access mode, proxy, filesystem identity, or `nomixupload`, which the SDK sets itself).
+  - **Interrupted writes** can leave an incomplete upload in the bucket. Write results that other systems read as a single final step (for example, produce the file on local disk, then copy it into the mount), and verify size/checksum afterward.
+  - Keep dependencies, build output, caches, and other scratch data on the sandbox's local disk, not on the mount.
+- Provide a minimal reference flow, adapted to the repo (the Cloudflare tutorial's example): process data → write results under the mount → read them back via a separate command.
+
+### F4 — Security and credential handling
+
+- Create the R2 API token with **Object Read & Write** permission scoped to the single target bucket only. Never use an account-wide admin token.
+- Store credentials only as Worker secrets (and local-only `.dev.vars` for development, which must be git-ignored). Never put them in `vars`, source, Dockerfile, sandbox environment, logs, or responses. In 1.0 the sandbox only receives placeholder credentials.
+- Mount the **narrowest** prefix the job needs, and prefer `read-only`. Any process in the sandbox that can reach the mount path can read, modify, and delete every object under that prefix, so untrusted code must get its own isolated prefix (ideally its own sandbox) and must never share a prefix with another tenant.
+- Authenticate and authorize every route that triggers jobs or reads results before touching a sandbox. Validate job/sandbox identifiers against a strict allowlist pattern before using them in names, prefixes, or paths.
+- Do not use a production bucket or real customer data for tests.
+
+### F5 — Errors and diagnostics
+
+- Map mount failures to clear, non-leaking responses. In 1.0 use `SandboxS3MountError.is(error)` and the `code` values (`S3_MOUNT_CONFLICT`, `S3_MOUNT_BUSY`, `S3_MOUNT_FAILED`, `S3_MOUNT_INCOMPATIBLE`); in 0.x handle `InvalidMountPointError` and `BucketAccessError`.
+- Call `inspect()` (1.0) before retrying a failed mount operation; the SDK does not retry on its own. Be aware `inspect()` has no timeout by default, so pass an `AbortSignal`.
+- Log operation, mount path, bucket, and prefix; never log credentials, signed headers, or file contents.
+
+### F6 — Local development
+
+- Document and verify a local path: for 1.0, an S3-compatible server such as MinIO plus `.dev.vars` overrides; for 0.x, `localBucket: true` under `wrangler dev`. FUSE needs Docker in a VM (such as Docker Desktop) or rootless Linux Docker with `/dev/fuse`.
+- Local verification does not prove production behavior against real R2; keep the two clearly separated in the report.
+
+### F7 — Tests
+
+See Section 9.
+
+### F8 — Documentation
+
+See Section 10.
+
+---
+
+## 6. Change Protection
+
+- Make focused, minimal patches. Preserve all existing, working features and architecture.
+- Do not silently change existing routes, bindings, bucket names, environment-variable names, or sandbox naming.
+- Do not reuse an existing bucket, prefix, or token that belongs to another feature. If the repository already uses R2 for something else (for example direct browser uploads using presigned URLs), keep this work on a separate bucket or a clearly separate prefix with its own scoped token, and do not alter that feature's CORS, token, or object layout.
+- Do not migrate between SDK generations without owner approval.
+- Never commit secrets, `.dev.vars`, access keys, or real signed URLs.
+- If a required change would break an approved existing feature, stop before the conflicting change, explain the exact conflict, and ask for permission. Continue independent work.
+- Do not deploy, change production secrets, or write to a production bucket unless explicitly authorized.
+
+---
+
+## 7. Implementation Notes by SDK Generation
+
+Use whichever matches the audit. Verify names against the current documentation before use.
+
+### 1.0 (`S3Mount`) outline
+
+1. Dockerfile with `fuse3`, `s3fs`, and `sandbox-shim`; `CMD ["sleep", "infinity"]`.
+2. `wrangler.jsonc`: `nodejs_compat`; `vars` for `S3_ENDPOINT` and `S3_BUCKET`; `secrets.required` for `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY`; container with `scheduling_policy: "durable_object"` and the named image.
+3. Worker main module re-exports `S3Gateway`.
+4. Durable Object constructor creates one `S3Mount(ctx.container, ctx.exports.S3Gateway)` and re-applies the inactivity timeout if the container is already running.
+5. A method starts the container (with `enableInternet: false` when possible), then calls `mounts.mount({ mountPath, source: { type: "s3", endpoint, region: "auto", bucket, credentials: { type: "static", ... } }, keyPrefix, access })`.
+6. Work runs via `container.exec([...], { cwd: mountPath })`.
+7. A finish method calls `unmount(mountPath)` then `container.destroy()`.
+
+### 0.x (`mountBucket`) outline
+
+1. Add an R2 binding in Wrangler and the Sandbox Durable Object binding.
+2. `const sandbox = getSandbox(env.Sandbox, name)`; `await sandbox.mountBucket(bucket, "/data", options)`.
+3. For production S3-endpoint mode, provide the R2 endpoint and credentials as Worker secrets (the SDK detects `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`). Binding mode omits `endpoint`; development uses `localBucket: true`. Confirm any required exports in the Storage API reference.
+4. Work runs via `sandbox.exec(...)`, with `sandbox.readFile` / `sandbox.writeFile` available.
+5. `sandbox.destroy()` ends the sandbox; data survives in R2.
+
+---
+
+## 8. Required Verification (Persistence Proof)
+
+Run against a **disposable** bucket or a dedicated test prefix, never production data. Record the exact commands, outputs, and timestamps.
+
+1. **Mount:** start a sandbox and mount the test prefix; confirm the path exists and (1.0) `inspect()` reports a managed, connected mount.
+2. **Write via standard operations:** run a command or script that writes a file (for example JSON results) under the mount.
+3. **Confirm in R2:** verify the object exists in the bucket using an independent route (for example `wrangler r2 object get ... --remote`, or the bucket's S3 API), not through the sandbox.
+4. **Destroy:** unmount (if applicable) and destroy the sandbox. Confirm it is gone.
+5. **Recreate:** start a **new** sandbox for the same key; mount; read the file back through the mount; confirm identical content (compare a checksum).
+6. **Negative checks:**
+   - A `read-only` mount rejects writes.
+   - A different prefix does not expose the first prefix's files (isolation).
+   - Data written to a **local-disk** path is gone after recreation (proves the persistence boundary).
+   - `unmount()` on a busy path fails with `S3_MOUNT_BUSY` and does not destroy data.
+   - A renamed file results in the expected copy-and-delete behavior.
+   - Stale-metadata behavior is demonstrated or documented (file added externally appears after the cache window or after tuning).
+7. **Cleanup:** remove the test objects and confirm the bucket/prefix is clean.
+
+If Docker, FUSE, Wrangler, or a Cloudflare account is unavailable in the environment, mark these checks `Unverifiable`, list the exact commands for the developer to run, and do **not** claim success.
+
+---
+
+## 9. Required Tests
+
+Use the test tooling already configured in the repository; do not add a heavy stack without need.
+
+- **Validation:** job/sandbox/prefix identifiers accept valid values and reject traversal, uppercase/invalid characters, leading/trailing separators, and overlong input.
+- **Mount helper:** correct arguments are built (endpoint, `region: "auto"`, bucket, `keyPrefix`, access mode); repeated calls are idempotent; conflicting settings surface a clear error.
+- **Error mapping:** each mount error code and the busy-unmount case produce the intended sanitized response; secrets never appear in error output.
+- **Auth:** unauthenticated and unauthorized requests cannot start jobs, mount, or read results.
+- **Isolation:** two keys never resolve to overlapping prefixes.
+- **Persistence flow (integration/E2E):** the Section 8 flow, automated where the environment allows, against a disposable bucket.
+- **File-semantics behavior:** rename, missing-file cache, and interrupted-write handling are covered or explicitly documented as manual checks.
+- **Secrets hygiene:** no credential strings exist in source, built output, test logs, or the container image.
+
+Run lint, type checks, unit tests, and the build using the repository's package manager. Never claim a check passed unless it was actually executed and the result inspected.
+
+---
+
+## 10. Documentation
+
+Deliver concise operational documentation that includes:
+
+- SDK generation used and why.
+- Exact configuration names (variables, secrets, bindings, container image) and where each is set.
+- R2 bucket and token creation steps, including the bucket-only, Object Read & Write scope.
+- Local-development steps and prerequisites (Docker, FUSE).
+- The persistence boundary: what persists (the mounted path) and what does not.
+- Object-storage semantic differences and the `s3fs` cache behavior, with recommended settings.
+- Operational limits (intercept limit per container, container inactivity timeout) and plan/pricing limits, linking to Cloudflare's current limits and pricing pages rather than copying numbers.
+- Deployment, rollback, and cleanup procedures.
+
+---
+
+## 11. Required Delivery Report
+
+After implementation, provide:
+
+1. **Audit Report** (Section 4.3), unchanged from before the build.
+2. **Feature Development List** (Section 5) with each item's final status mapped to audit IDs.
+3. **Files changed**: every new or modified file and its purpose.
+4. **Mounting behavior**: exact mount parameters, path, prefix, access mode.
+5. **Persistence behavior**: key strategy and the recorded write → destroy → recreate → read proof.
+6. **File-operation behavior**: wrappers or usage, and how storage semantics are handled.
+7. **Security**: token scope, secret handling, prefix isolation, authentication.
+8. **Tests and commands**: what ran, passed, failed, and could not be run.
+9. **Final fulfillment statement** for each of the three capabilities, based only on evidence.
+10. **Remaining limitations**: especially unverified production behavior, the cache window, intercept limits, interrupted-write risk, and plan limits.
+
+---
+
+## 12. Acceptance Criteria
+
+- [ ] SDK generation identified and the implementation matches it.
+- [ ] An R2 bucket (or prefix) is mounted as a filesystem path in a running sandbox.
+- [ ] Data written to the mount is visible in R2 through an independent check.
+- [ ] After the sandbox is destroyed, a new sandbox mounting the same key reads the same data without any manual restore step.
+- [ ] Data outside the mount is demonstrated not to persist, and this boundary is documented.
+- [ ] Standard file operations (shell, Python I/O, SDK file API where available) work on the mounted path.
+- [ ] Rename, lock, permission, cache, and interrupted-write differences are handled or documented.
+- [ ] The R2 token is scoped to one bucket with Object Read & Write only; secrets are stored only as Worker secrets and never exposed to the sandbox, logs, or source.
+- [ ] Read-only mounts are used where the job only reads; prefixes are narrow and isolated.
+- [ ] All entry routes are authenticated, and identifiers are validated.
+- [ ] Mount errors and busy-unmount cases are handled with sanitized messages.
+- [ ] Tests and build were executed, or unverifiable items are explicitly listed with exact commands.
+- [ ] No existing feature, bucket, token, or route was changed without authorization.
+
+Do not mark any criterion complete without implementation evidence or an executed test.
+
+---
+
+## Official References
+
+Re-read these before implementing; the documentation is the authority if it differs from this prompt.
+
+- Mount an R2 bucket (Sandbox 1.0): https://developers.cloudflare.com/sandbox/files/mount-an-r2-bucket/
+- S3Mount API reference (1.0): https://developers.cloudflare.com/sandbox/reference/s3-mounts/
+- Data persistence with R2 tutorial (Sandbox SDK 0.x): https://developers.cloudflare.com/sandbox/sdk/tutorials/persistent-storage/
+- Storage API (0.x `mountBucket`): https://developers.cloudflare.com/sandbox/sdk/api/storage/
+- Sandbox documentation index for agents: https://developers.cloudflare.com/sandbox/llms.txt
+- R2 API tokens: https://developers.cloudflare.com/r2/api/tokens/
+- R2 S3 API compatibility: https://developers.cloudflare.com/r2/api/s3/api/

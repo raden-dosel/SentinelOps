@@ -1,0 +1,451 @@
+# SentinelOps Project Connectivity Detection & Cloudinary Image Upload — Implementation Prompt
+
+**Target coding agent:** GitHub Copilot Agent or Claude Code  
+**Project:** SentinelOps — offline-first React + TypeScript + Vite PWA, IndexedDB, ASP.NET Core Web API, PostgreSQL sync foundation  
+**Scope:** Project module connectivity status and secure upload of project images to Cloudinary  
+**Mode:** Audit first, then implement and verify the feature
+
+---
+
+## 1. Role
+
+Act as a Senior Full-Stack Engineer, PWA/Offline-First Architect, ASP.NET Core API Engineer, Cloudinary Integration Specialist, Application Security Engineer, and QA Engineer.
+
+Implement a reliable, secure, tablet-friendly project image-upload feature that respects SentinelOps' offline-first architecture. Do not treat adding a file input or checking `navigator.onLine` as a complete solution.
+
+## 2. Project Context and Existing Architecture
+
+SentinelOps is an offline-first Progressive Web Application built with React, TypeScript, Vite, and Tailwind CSS. It primarily stores business records in browser IndexedDB. An ASP.NET Core Web API and PostgreSQL synchronization foundation exists as a scalable capability, but the live API/database connection and complete multi-device synchronization must not be assumed to be verified.
+
+The current audit identified these relevant behaviors:
+
+- Project records and attachment metadata are stored locally in IndexedDB.
+- Attachment blobs currently remain in local IndexedDB; the existing synchronization implementation may send metadata without uploading the binary image itself.
+- A Cloudinary upload must be added as a distinct, verified capability.
+- Local device authentication and cloud/device authentication are different concepts. Do not treat a locally authenticated user as automatically authenticated to a server-side upload-signature endpoint.
+
+**Audit the current repository before deciding which files or interfaces to change.** Confirm the latest Project UI, attachment repository and data types, API client, environment-variable convention, health endpoints, API authorization scheme, sync outbox behavior, and existing tests. Treat the above context as a lead to verify against the actual code.
+
+## 3. Objective
+
+Add an internet/API-aware Cloudinary image-upload capability to the Projects module.
+
+The feature must:
+
+1. Detect browser network changes.
+2. Independently check whether the SentinelOps API can be reached.
+3. Enable the **Cloudinary upload** control only when the browser reports a network connection and the relevant SentinelOps API endpoint is reachable/configured.
+4. When offline, disable the remote Cloudinary upload control and display this warning:
+
+   > **No internet connection. Connect to the internet to upload project photos to Cloudinary.**
+
+5. When the browser reports online but the API cannot be reached, display a distinct warning:
+
+   > **SentinelOps server is unreachable. Cloud uploads are temporarily unavailable. Check your connection and try again.**
+
+6. Upload one or multiple project images securely to Cloudinary.
+7. Persist the resulting attachment metadata through the existing project's storage/data model and supported synchronization workflow.
+8. Handle failed uploads, timeouts, retries, and partial success without losing local data or claiming an upload succeeded when it did not.
+9. Automatically name every image uploaded to a project from the project's name and start date, followed by a sequence number that starts at 1 and increments for each image in that project (see Section 7A). Example: `Main-Lobby-CCTV_2026-10-26_1.jpg`, `Main-Lobby-CCTV_2026-10-26_2.jpg`.
+
+**Only the remote Cloudinary-upload action should be disabled offline.** Do not disable project editing, progress notes, or unrelated offline capabilities. If the existing Project UI allows local-only photo attachment while offline, preserve that behavior. Add a distinct Cloudinary upload action or a clearly separated online-upload step rather than silently breaking the existing offline workflow.
+
+---
+
+## 4. Mandatory Workflow and Change Protection
+
+### Phase A — Read-only audit
+
+Before editing any code:
+
+- Inspect the complete Project feature flow and current attachment data model.
+- Trace current image selection, Blob persistence, preview generation, metadata writes, delete behavior, and sync outbox integration.
+- Locate API base URL configuration and current health/readiness endpoints.
+- Inspect current API authentication/authorization, device registration, CORS, environment settings, and server configuration.
+- Identify whether any Cloudinary configuration already exists.
+- Inspect tests and the repository's package manager/build workflow.
+- Report the files and components that require changes and any architectural conflicts.
+
+Do not invent file paths or claim a file/endpoint exists until the repository confirms it.
+
+### Phase B — Preserve previous work
+
+- Make focused, minimal patches.
+- Preserve the existing offline-first design and all working Project workflows.
+- Do not rewrite the application architecture or replace the current storage layer without a demonstrated need.
+- Do not remove local attachment support merely to introduce Cloudinary.
+- Do not silently change sync semantics, document schemas, authentication, routes, or environment-variable names.
+- Never commit credentials, upload signatures, database connection strings, or API secrets.
+- If a required implementation would break or conflict with an approved earlier feature, stop before that conflicting change; explain the exact conflict and request permission. Continue independent, nonconflicting work.
+- Do not use production Cloudinary resources or real customer images in tests.
+
+### Phase C — Implement and test
+
+Implement the smallest coherent end-to-end feature. Add tests, run available checks, fix introduced regressions, and report evidence. Do not mark work complete because the UI renders.
+
+---
+
+## 5. Network and API Reachability Detection
+
+Create or extend a reusable connectivity service/hook using the existing project conventions. Do not duplicate event listeners across individual components.
+
+### Required state model
+
+Use explicit states, adapting naming to the project's conventions:
+
+- `checking`: initial or refreshed check is in progress.
+- `offline`: `navigator.onLine === false` or browser offline event received.
+- `api-unreachable`: browser indicates online, but the SentinelOps API health/signing endpoint cannot be reached within a bounded timeout.
+- `ready`: browser indicates online and a lightweight SentinelOps API reachability check succeeds.
+- `uploading`: an upload operation is currently in progress; this is an operation state and should not erase the underlying connectivity state.
+- `upload-error`: upload failed; show a helpful retry action without losing the user's selection or saved local record.
+
+If a smaller state model fits the existing UI, preserve the same observable behavior and distinguish offline from API-unreachable.
+
+### Detection behavior
+
+- Check `navigator.onLine` initially.
+- Subscribe to `window` `online` and `offline` events and clean up listeners correctly.
+- On a transition to online, re-check API reachability before enabling Cloudinary uploads.
+- Check reachability when the Projects view mounts/returns to the foreground and when the user explicitly retries.
+- Use the configured SentinelOps API base URL; never hardcode the production hostname into a reusable service.
+- Use an existing lightweight liveness/health endpoint only after confirming its actual path and behavior. Do not use a database-dependent readiness endpoint unless database readiness is intentionally required for obtaining upload authorization.
+- Use a bounded timeout (for example, 5–8 seconds) and cancel/ignore stale in-flight checks when appropriate.
+- Avoid a tight polling loop. Refresh on browser events, view re-entry, explicit retry, and a modest interval only if the current architecture requires it.
+- Ensure the health request is not satisfied by an inappropriate service-worker cache entry; verify that the check actually reaches the configured API.
+- Do not use `navigator.onLine` alone as proof that the internet or SentinelOps API is available. It reports browser/network heuristics and can be `true` when a specific service is inaccessible.
+- Do not claim Cloudinary itself is reachable just because the SentinelOps API health endpoint responds. The actual upload result remains authoritative for Cloudinary availability.
+
+Reference: MDN explains the limitations of `Navigator.onLine` and online/offline events: https://developer.mozilla.org/en-US/docs/Web/API/Navigator/onLine
+
+### UI requirements
+
+In the Project details/create/edit area where project images are managed:
+
+- Show a clear status indicator with accessible text, not color alone.
+- During `checking`, show a non-alarming “Checking connection…” status and keep the remote upload action disabled.
+- In `offline`, disable the Cloudinary upload button and relevant remote-upload file picker; display the exact offline warning specified in Section 3.
+- In `api-unreachable`, disable remote upload and display the API-unreachable warning.
+- In `ready`, enable the upload action, subject to file validation and authorization.
+- During upload, prevent duplicate submissions and show progress where feasible.
+- Use accessible `disabled` semantics, focus states, `aria-live` for important status changes, and clear error messages.
+- Do not use a browser alert as the primary feedback mechanism if the app already has toast/banner/dialog patterns.
+- Do not disable unrelated project form inputs or existing local-only attachment functionality.
+
+---
+
+## 6. Cloudinary Integration and Security
+
+### Preferred architecture: server-signed, direct-to-Cloudinary upload
+
+Use the ASP.NET Core API to authorize/sign uploads; send the image bytes directly from the browser to Cloudinary. This avoids routing every image byte through the API host while keeping Cloudinary's API secret server-side.
+
+The intended flow is:
+
+1. User chooses image(s) for a specific project.
+2. Frontend verifies the connection state and performs client-side file checks.
+3. Frontend requests upload authorization from the SentinelOps API.
+4. The API authenticates/authorizes the caller, verifies access to the requested business/project scope, and generates short-lived signed upload parameters using a supported Cloudinary SDK or verified signature implementation.
+5. The browser uploads directly to Cloudinary over HTTPS using the signed parameters.
+6. The frontend handles the provider response and sends the resulting metadata to the appropriate SentinelOps persistence/finalization path.
+7. The attachment reference is durably saved locally and queued for synchronization as appropriate.
+8. Another authorized tablet can retrieve or display the image according to the selected Cloudinary access policy.
+
+Cloudinary documents signed uploads and explicitly warns never to expose `api_secret` in client-side code: https://cloudinary.com/documentation/upload_images and https://cloudinary.com/documentation/authentication_signatures
+
+### API security requirements
+
+- Store `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` only in server-side environment variables or a supported secret manager. The cloud name/API key may be returned where required by the upload protocol; the API secret must never be exposed to Vite client code, a `VITE_` variable, HTML, logs, or browser storage.
+- Do not commit `.env` files, credentials, real signature values, or production URLs containing secrets.
+- Do not create an unrestricted anonymous signature endpoint.
+- Use the repository's existing cloud/device authentication model if it provides an appropriate authorization boundary. Verify that the caller is authorized for the target business and project; a device token or client-supplied business ID must not automatically grant access to arbitrary projects.
+- If no suitable authorization model exists, implement only the minimum safe authorization extension compatible with the existing design and document any decision that requires owner approval.
+- Enforce server-side upload policy: approved image formats, maximum file size, allowed project/business scope, a controlled folder/path, and a constrained set of signed parameters.
+- Generate stable, non-user-controlled Cloudinary public IDs or upload identifiers. Prevent path traversal, arbitrary folder names, and cross-business uploads.
+- Add rate limiting and reasonable request-size/time limits to the signature endpoint. It returns upload authorization metadata, not the API secret.
+- Avoid logging tokens, signatures, filenames containing sensitive client data, or customer images.
+- Treat Cloudinary's upload response as untrusted input until validated. Use the selected SDK's supported response-signature verification or a server-side asset lookup/finalization method before accepting important metadata as authoritative.
+- Do not trust arbitrary client-supplied `secure_url`, `public_id`, byte count, or project ID.
+- Handle Cloudinary credentials absent from configuration as a clear server configuration error; the frontend must disable/handle the feature gracefully rather than display success.
+
+### API endpoint design
+
+Inspect existing route conventions before choosing exact names. If none exists, propose endpoints similar to:
+
+- `POST /api/v1/projects/{projectId}/images/upload-signature` — authorize project access and issue narrowly scoped signed upload parameters.
+- `POST /api/v1/projects/{projectId}/images/complete` — validate/finalize uploaded asset metadata and associate it with the project, if server-side finalization is required by the chosen design.
+
+Do not implement both blindly if the repository has a simpler, safe existing pattern. Document request/response DTOs and status/error codes. Never return `api_secret`.
+
+### Cloudinary image privacy
+
+Project photos can reveal client premises, equipment, or security installations. Do not assume that an HTTPS `secure_url` makes an image private.
+
+- Review Cloudinary delivery/access modes and the account's capabilities before selecting public, private, or authenticated delivery.
+- Prefer private/authenticated delivery or an approved access-controlled approach when images should not be publicly accessible.
+- If only public delivery is feasible in the current account/plan, explicitly document the privacy implications and require owner approval before uploading real customer images.
+- Store stable identifiers such as provider, asset ID, public ID, resource type, format, dimensions, size, project ID, upload status, and timestamps. Store a delivery URL only if appropriate to the selected access model.
+- Avoid using client names, addresses, or other PII in public IDs or folder names.
+
+---
+
+## 7. Image Selection and Upload Behavior
+
+Support selecting multiple images in one user action, within configurable limits and the Cloudinary plan's capabilities.
+
+### Initial validation
+
+- Allow only approved image MIME types, for example JPEG, PNG, and WebP, after confirming the app and business requirements.
+- Check MIME type, file extension as a supporting hint, and maximum file size client-side for user feedback; do not rely on client-side validation as a security boundary.
+- Enforce equivalent or stronger restrictions server-side through the signed upload policy/preset and provider configuration where supported.
+- Reject empty files and files above the configured size/count limits with actionable feedback.
+- Do not base64-encode full images unnecessarily; upload using `FormData`/`File` or the supported Cloudinary client upload protocol.
+- Consider memory usage and tablet camera image sizes. Avoid loading all selected images into memory at once.
+- If image compression/resizing is introduced, preserve the original where needed and avoid changing image contents without a clear requirement.
+
+### Upload lifecycle
+
+Represent each file's lifecycle explicitly, such as:
+
+- selected
+- validating
+- requesting authorization
+- uploading
+- uploaded
+- finalizing/saving metadata
+- failed
+
+Requirements:
+
+- Show per-file or batch progress where feasible.
+- Prevent accidental duplicate submissions.
+- For multiple images, report per-file success/failure instead of pretending the whole batch succeeded when one file fails.
+- Preserve successful uploads when another file fails.
+- Provide retry for failed items.
+- Use a stable upload identifier/public ID for a logical upload and design retry handling to avoid duplicate Cloudinary assets after a timeout or lost response.
+- Do not clear selected files or mark an attachment complete before Cloudinary reports success and the metadata has been durably saved.
+- Handle the edge case where Cloudinary upload succeeds but the local IndexedDB write/finalization fails. Surface the incomplete metadata state and provide a recovery/retry path; do not falsely report full success.
+- Do not automatically delete a remotely uploaded asset simply because a later local operation failed. Cloudinary deletion must be a separately authorized server-side operation, not a client-side secret-bearing request.
+
+---
+
+## 7A. Automatic Image Naming: Project Name + Start Date + Sequence Number
+
+Every image uploaded to a project must receive a generated display name built from the project's **name**, the project's **start date**, and a **sequence number** that starts at `1` and increments by one for each image added to that project.
+
+### Naming format
+
+```
+{ProjectName}_{StartDate}_{Sequence}.{ext}
+```
+
+- **ProjectName:** the project's current name, sanitized as described below.
+- **StartDate:** the project's start date in ISO format `YYYY-MM-DD`.
+- **Sequence:** a positive integer, starting at `1`, with no zero padding unless the owner requests it (`_1`, `_2`, … `_10`).
+- **ext:** derived from the validated MIME type/detected format (`jpg`, `png`, `webp`), not from the user's original filename.
+
+Example, for a project named "Main Lobby CCTV" with start date 26 Oct 2026:
+
+- `Main-Lobby-CCTV_2026-10-26_1.jpg`
+- `Main-Lobby-CCTV_2026-10-26_2.png`
+- `Main-Lobby-CCTV_2026-10-26_3.webp`
+
+### Name sanitization
+
+Implement one shared, unit-tested helper (for example `buildProjectImageName`) so the UI, upload flow, and any download/export path never format names differently.
+
+- Normalize Unicode (NFKC), trim, and replace whitespace runs with a single hyphen.
+- Remove or replace path separators and characters unsafe in filenames (`/ \ : * ? " < > |`), control characters, and leading/trailing dots or hyphens.
+- Collapse repeated separators and enforce a maximum length for the project-name segment (for example 60 characters) so the final name stays well under filesystem and Cloudinary limits.
+- Avoid reserved device names (for example `CON`, `NUL`) and never produce an empty segment. If the sanitized project name is empty, use a safe fallback such as `Project`.
+- Preserve readable non-Latin characters only if they pass the above rules; otherwise fall back as above. Never let the project name inject path segments, extra extensions, or markup.
+
+### Start date handling
+
+- Read the project's existing start-date field. Confirm its real field name and storage format in the audit before using it.
+- Format the stored **date-only** value directly as `YYYY-MM-DD`. Do not round-trip it through `new Date(...)` with UTC conversion: the app's users are in UTC+8 (Philippines), and a UTC conversion can shift the date by one day.
+- If the start date is missing or invalid, use a clear fixed placeholder such as `undated`, never the current date, and surface it in the UI so the user can set the start date. Document this behavior.
+
+### Sequence rules
+
+- The sequence is **per project**: each project's first image is `_1`, independent of other projects.
+- A sequence number is assigned **once per logical attachment** and stored on the attachment record (for example `sequenceNumber`). It is immutable after assignment.
+- Numbers are **never reused** after an image is deleted. Gaps are acceptable and preferable to renaming existing images. Document this clearly; the owner may later request gap-free renumbering as a separate, approved feature.
+- For a multi-image selection, assign consecutive numbers in the order the user selected the files, before uploads begin, so that parallel uploads and retries cannot reorder or duplicate numbers.
+- A retry of a failed upload **reuses its originally assigned number**. A retry must never consume a new number.
+- A failed or abandoned upload may leave a gap; do not renumber to hide it.
+- Determine the next number inside the same IndexedDB transaction that creates the attachment record (for example `max(sequenceNumber for projectId) + 1`), so two rapid actions on one device cannot receive the same number.
+- **Multi-device collisions:** two tablets may assign the same number to the same project before they sync. Audit how the sync protocol identifies attachments and, if the API persists attachment metadata, prefer server-side allocation or validation at upload-authorization/finalization time. Otherwise, define a deterministic collision rule (for example, earliest `uploadedAt`, then lowest attachment ID keeps the number; the other is reassigned the next free number) and test it. Do not silently overwrite or drop either attachment.
+
+### What gets stored vs. what gets derived
+
+Keep three things separate:
+
+1. **Cloudinary public ID / upload identifier:** stable, opaque, and generated per Section 6 (based on IDs, not names). It must **not** contain the project name, client name, or any PII, and it never changes. Project names often contain client or site names, so this deliberately overrides any temptation to reuse the display name as the public ID.
+2. **Stored attachment fields:** `projectId`, `sequenceNumber`, original filename (optional, for audit only), MIME type, size, and timestamps.
+3. **Display/download filename:** derived from the project's **current** name and start date plus the stored `sequenceNumber` whenever it is rendered, downloaded, or exported. Because it is derived, it automatically adapts if the project is renamed or its start date is edited, without touching Cloudinary or rewriting stored images.
+
+Optionally, pass the generated name to Cloudinary as `display_name` only after verifying that the plan, SDK, and signature rules support it and that it is covered by the signed parameters. It is a convenience label only, never an identifier, and the server must build it itself rather than trusting a client-supplied value.
+
+If the owner instead wants the name frozen at upload time (not adapting to later renames), store the generated name on the record and document that change. Treat the derived behavior above as the default.
+
+### Scope and compatibility
+
+- Apply the naming rule to all images uploaded through the new Cloudinary flow. Apply it to local-only attachments added while offline only if the audit shows this can be done without changing existing offline behavior; otherwise report the option and ask the owner before changing it.
+- Do **not** retroactively rename or renumber existing attachments without explicit owner approval. Existing attachments without a `sequenceNumber` must continue to render with their current names, and new uploads should start from `max(existing sequenceNumbers) + 1`, or `1` if none exist. Report how the audit found legacy images are handled.
+- Preserve project and attachment IDs. The attachment ID, not the display name, remains the key for storage, sync, and deletion.
+- Extend the attachment type/schema minimally and update sync contracts and tests deliberately if `sequenceNumber` must be synchronized. Do not silently drop it.
+- Display the generated name in the project's image list and use it as the download filename. Surface the name in an accessible way (text, not color or tooltip alone).
+
+### IndexedDB and sync integration
+
+- Extend the existing attachment entity/repository minimally; do not replace the database abstraction.
+- Preserve the existing project ID and stable attachment ID relationships.
+- Save Cloudinary metadata in IndexedDB using the repository's established patterns.
+- Enqueue attachment metadata for synchronization only after successful upload/finalization and metadata persistence, using the existing atomic write-plus-outbox transaction where supported.
+- Ensure pull/merge on another tablet receives sufficient metadata to render the image according to its access mode.
+- Clearly distinguish `local-only`, `upload-pending`, `uploaded`, and `upload-failed` attachment states if the current model supports queued local attachments. Do not confuse metadata sync with binary upload.
+- If the existing sync protocol cannot safely handle a new field/entity shape, update contracts and tests deliberately; do not silently drop fields.
+- Keep local fallback behavior intact. Do not delete an existing local Blob until the remote upload is confirmed and the chosen retention strategy is explicitly documented.
+- When offline, the new Cloudinary remote-upload action must be disabled as specified. Existing offline local attachment behavior must remain unchanged unless the user has explicitly approved a different behavior.
+
+---
+
+## 8. Configuration and Deployment
+
+Document the required configuration without putting secrets in the repository.
+
+### Backend environment variables
+
+Use the repository's existing configuration convention and document the exact names, for example:
+
+- `Cloudinary__CloudName`
+- `Cloudinary__ApiKey`
+- `Cloudinary__ApiSecret`
+- Existing API origin/CORS settings
+
+The exact variable names must match the implementation in `Program.cs`/configuration classes. Do not add competing aliases without a need.
+
+Configure these values in the API hosting platform's secret/environment settings, not in Cloudflare Pages frontend variables. Frontend configuration should contain only the public API base URL and any genuinely public configuration needed by the browser.
+
+### Deployment steps
+
+Provide a practical guide covering:
+
+1. Configure Cloudinary environment credentials in the API host.
+2. Set the allowed PWA CORS origin if direct calls to the SentinelOps API require it.
+3. Deploy the API endpoint(s) and verify readiness.
+4. Rebuild/redeploy the PWA only if frontend code/configuration changes require it.
+5. Test using a disposable project and non-sensitive test images.
+6. Verify uploads in Cloudinary, metadata persistence in IndexedDB, and cross-device metadata synchronization.
+7. Verify that no secret is present in built frontend assets, browser developer tools, or source control.
+8. Document quota/usage limits, billing alerts if available, retention, deletion policy, and recovery handling.
+
+Do not deploy, change production secrets, upload real customer images, or use production Cloudinary credentials during automated tests unless explicitly authorized.
+
+---
+
+## 9. Required Tests
+
+Add/update tests using the tools already configured in the repository. Do not add a heavy testing stack without a demonstrated need.
+
+### Connectivity tests
+
+- Initial `navigator.onLine === false` disables remote upload and shows the offline warning.
+- `offline` event disables remote upload promptly.
+- `online` event triggers a fresh reachability check but does not immediately claim the API is ready.
+- `navigator.onLine === true` with API health/signature endpoint failure displays API-unreachable state and keeps upload disabled.
+- Successful API reachability enables upload when no other blocking condition exists.
+- Timeout, abort, and unmount do not leave stale state or unhandled promise rejections.
+- Event listeners are cleaned up correctly.
+- Health responses are not falsely served from stale service-worker cache.
+
+### Upload tests
+
+- Upload button is disabled while offline/checking/API-unreachable.
+- Correct warning text is displayed for offline and API-unreachable states.
+- Invalid file type, zero-byte file, oversized file, and too many files are rejected.
+- Valid single and multiple images upload successfully using a mocked Cloudinary endpoint or a disposable test account.
+- API signature request fails securely when unauthorized or when Cloudinary credentials are missing.
+- API secret never appears in frontend bundles, response DTOs, browser storage, or test logs.
+- Partial batch failure preserves successful items and allows retry of failed items.
+- Upload failure, timeout, or lost response never results in a false “uploaded” state.
+- Metadata persists to IndexedDB and a durable outbox operation is created only at the correct lifecycle point.
+- Another isolated browser profile can retrieve/render the synced attachment metadata according to the delivery policy.
+- Existing local-only attachment behavior and ordinary project editing still work offline.
+
+### Image naming and sequence tests
+
+- The first image uploaded to a new project is named `{ProjectName}_{StartDate}_1.{ext}`; each later image increments by one.
+- Sequence numbers are per project: two projects each start at `1` independently.
+- A multi-image selection receives consecutive numbers in selection order, even when uploads finish out of order.
+- Retrying a failed upload reuses its original number and does not consume a new one.
+- Deleting an image does not cause its number to be reused.
+- Two rapid upload actions on one device never receive the same number (assignment is atomic within the IndexedDB transaction).
+- Multi-device collision: two attachments with the same project and sequence number are resolved by the documented deterministic rule, and neither is dropped.
+- Project names with spaces, Unicode, path separators, reserved characters, reserved device names, empty results, and very long values produce safe, bounded filenames.
+- Start date is formatted from the stored date-only value without a one-day shift in UTC+8; a missing or invalid start date yields the documented placeholder, not the current date.
+- Renaming the project or editing its start date changes the derived display/download name, while the Cloudinary public ID, attachment ID, and stored `sequenceNumber` are unchanged.
+- The Cloudinary public ID never contains the project name or other PII.
+- Legacy attachments without a `sequenceNumber` still render, are not renamed, and new uploads continue from `max + 1`.
+- The file extension comes from the validated type, not the original filename.
+
+### Verification commands
+
+Run the repository's available checks, such as frontend lint/type checks, unit tests, production build, API build, API unit tests, and relevant integration tests. Use the package manager already configured in the repository. The developer does not have local npm/.NET tooling, so document how to run checks in the existing browser-based development environment or CI when local execution is unavailable.
+
+Never claim tests passed unless they were actually executed and their results inspected.
+
+---
+
+## 10. Acceptance Criteria
+
+The feature is complete only when all applicable criteria are proven:
+
+- [ ] Initial and changing network conditions are represented accurately.
+- [ ] `navigator.onLine` is treated as a hint, not proof of API/Cloudinary availability.
+- [ ] Cloudinary upload is disabled when offline, and the specified warning appears.
+- [ ] Cloudinary upload is disabled when SentinelOps API authorization/signature service is unreachable.
+- [ ] The existing offline project workflow remains functional.
+- [ ] A legitimate authorized user can upload multiple validated images to Cloudinary.
+- [ ] Cloudinary credentials and API secrets remain server-side.
+- [ ] Project/business authorization and upload limits are enforced server-side.
+- [ ] Cloudinary attachment metadata is saved reliably and sync-compatible.
+- [ ] Image privacy/access policy is explicitly chosen and documented.
+- [ ] Every uploaded project image is named `{ProjectName}_{StartDate}_{Sequence}` with the sequence starting at 1 per project, never reused, stable across retries, and safe against multi-device collisions.
+- [ ] Generated names are sanitized, derived from the project's current name and start date, and kept separate from the opaque Cloudinary public ID; legacy attachments are not renamed without approval.
+- [ ] Failure, retry, partial success, and interrupted persistence are handled without false success or silent data loss.
+- [ ] Automated tests and production build are run where tooling is available.
+- [ ] Deployment and environment setup instructions are documented.
+- [ ] No existing feature or unrelated architecture was changed without authorization.
+
+Do not mark an acceptance criterion complete without implementation evidence or an executed test.
+
+---
+
+## 11. Required Delivery Report
+
+After implementation, provide:
+
+1. **Audit summary:** Existing project/attachment/connectivity architecture found.
+2. **Files changed:** Every new or modified file and its purpose.
+3. **Connectivity behavior:** Exact state machine and API check used.
+4. **Cloudinary flow:** How signatures, uploads, finalization, and metadata persistence work.
+5. **Security/privacy:** Authorization, secret handling, upload constraints, and selected asset access model.
+6. **Image naming:** The naming helper, sanitization rules, start-date handling and fallback, where and how the sequence number is assigned, the multi-device collision rule, how legacy attachments are handled, and whether names are derived (adapt to renames) or frozen.
+7. **Tests and commands:** What ran, what passed, what failed, and what could not be run.
+8. **Deployment instructions:** Exact backend configuration and front-end redeployment steps.
+9. **Remaining limitations:** Especially free-plan constraints, public/private image access, orphan-upload recovery, sequence gaps after deletions or abandoned uploads, and unverified cloud synchronization.
+
+### Final directive
+
+Implement the feature as an addition to SentinelOps, not a rewrite. Preserve offline-first operation, verify the existing repository before making assumptions, secure the Cloudinary integration, and deliver a tested end-to-end upload path with truthful connectivity messaging.
+
+## Official References
+
+- Cloudinary — Upload images and files: https://cloudinary.com/documentation/upload_images
+- Cloudinary — Authentication signatures: https://cloudinary.com/documentation/authentication_signatures
+- Cloudinary — Client-side uploading: https://cloudinary.com/documentation/client_side_uploading
+- MDN — `Navigator.onLine`: https://developer.mozilla.org/en-US/docs/Web/API/Navigator/onLine
+- MDN — `online` event: https://developer.mozilla.org/en-US/docs/Web/API/Window/online_event
+- MDN — `offline` event: https://developer.mozilla.org/en-US/docs/Web/API/Window/offline_event

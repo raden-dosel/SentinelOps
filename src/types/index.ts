@@ -361,10 +361,18 @@ export interface AttachmentMetadata {
   fileSize: number; // bytes
   caption?: string;
   uploadedAt: string;
+  sequenceNumber?: number;
+  cloudinaryPublicId?: string;
+  cloudinaryUrl?: string;
+  r2ObjectKey?: string;
+  r2Bucket?: string;
+  r2FolderName?: string;
+  etag?: string;
+  storageProvider?: 'local' | 'cloudflare-r2' | 'cloudinary';
 }
 
 export interface AttachmentRecord extends AttachmentMetadata {
-  blob: Blob;
+  blob?: Blob;
 }
 
 // --- Backup & Restore ---
