@@ -46,6 +46,8 @@ import {
   Cloud,
   Check,
   AlertTriangle,
+  Copy,
+  Info,
 } from 'lucide-react';
 import { useConnectivity, OFFLINE_WARNING, API_UNREACHABLE_WARNING } from '../../hooks/useConnectivity';
 import {
@@ -108,6 +110,10 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   // Deletion confirm
   const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  // R2 CORS Helper Modal
+  const [isCorsModalOpen, setIsCorsModalOpen] = useState(false);
+  const [copiedCors, setCopiedCors] = useState(false);
 
   const projectStatuses: ProjectStatus[] = [
     'Planning',
@@ -355,6 +361,32 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
 
   const handleDismissBatch = () => {
     setUploadBatch([]);
+  };
+
+  const handleSaveFailedItemLocally = async (item: R2UploadItem) => {
+    if (!selectedProject) return;
+    try {
+      const attRecord: AttachmentRecord = {
+        id: item.id || Math.random().toString(36).substring(2, 9),
+        entityType: 'Project',
+        entityId: selectedProject.id,
+        fileName: item.displayName || item.file.name,
+        fileType: item.file.type || 'image/jpeg',
+        fileSize: item.file.size,
+        caption: item.displayName,
+        uploadedAt: new Date().toISOString(),
+        sequenceNumber: item.sequenceNumber,
+        storageProvider: 'local',
+        blob: item.file,
+      };
+
+      await attachmentRepository.saveAttachment(attRecord);
+      setUploadBatch((prev) => prev.filter((it) => it.id !== item.id));
+      showToast('Photo saved directly to local storage', 'success');
+      await loadProjectAttachments(selectedProject.id);
+    } catch {
+      showToast('Failed to save photo locally', 'error');
+    }
   };
 
   // Upload Local Photo / Document (Available offline & online)
@@ -770,6 +802,27 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                     )}
                   </div>
 
+                  {uploadBatch.some((b) => b.state === 'failed' && (b.error?.toLowerCase().includes('cors') || b.error?.toLowerCase().includes('network error'))) && (
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 font-bold text-amber-300">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span>Cloudflare R2 CORS Policy Required</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsCorsModalOpen(true)}
+                          className="px-2.5 py-1 text-[11px] font-semibold bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 rounded-lg transition shrink-0"
+                        >
+                          Fix CORS Settings
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                        Direct browser-to-R2 uploads require CORS in your Cloudflare bucket settings. Click <strong>Fix CORS Settings</strong> to copy the ready-to-paste JSON, or click <strong>Save Locally</strong> on any photo below to store it in local offline storage right away.
+                      </p>
+                    </div>
+                  )}
+
                   <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                     {uploadBatch.map((item) => (
                       <div
@@ -798,15 +851,25 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                               {item.state}
                             </span>
                             {item.state === 'failed' && (
-                              <button
-                                type="button"
-                                disabled={isBatchUploading || connectivity.status !== 'ready'}
-                                onClick={() => handleRetryUpload(item)}
-                                className="px-2 py-0.5 text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 rounded border border-amber-500/40 flex items-center gap-1 transition"
-                              >
-                                <RefreshCw className="w-2.5 h-2.5" />
-                                <span>Retry #{item.sequenceNumber}</span>
-                              </button>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={isBatchUploading || connectivity.status !== 'ready'}
+                                  onClick={() => handleRetryUpload(item)}
+                                  className="px-2 py-0.5 text-[10px] font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 rounded border border-amber-500/40 flex items-center gap-1 transition"
+                                >
+                                  <RefreshCw className="w-2.5 h-2.5" />
+                                  <span>Retry</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveFailedItemLocally(item)}
+                                  className="px-2 py-0.5 text-[10px] font-bold bg-slate-700 hover:bg-slate-600 text-slate-200 rounded border border-slate-600 transition"
+                                  title="Save photo safely into local storage"
+                                >
+                                  <span>Save Locally</span>
+                                </button>
+                              </div>
                             )}
                           </div>
                         </div>
@@ -1085,6 +1148,114 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
             className="max-w-full max-h-[90vh] rounded-2xl object-contain shadow-2xl"
           />
         </div>
+      )}
+
+      {/* R2 Bucket CORS Helper Modal */}
+      {isCorsModalOpen && (
+        <Modal
+          isOpen={isCorsModalOpen}
+          onClose={() => setIsCorsModalOpen(false)}
+          title="Cloudflare R2 Bucket CORS Policy"
+          subtitle="Configure your Cloudflare R2 bucket to permit direct browser image uploads"
+          maxWidth="2xl"
+        >
+          <div className="space-y-4 text-xs">
+            <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-200 space-y-1">
+              <div className="font-semibold text-blue-300 flex items-center gap-1.5">
+                <Info className="w-4 h-4 text-blue-400" />
+                <span>Why is this required?</span>
+              </div>
+              <p className="leading-relaxed">
+                SentinelOps uploads images directly from your browser to Cloudflare R2 via pre-authorized cryptographic signatures. Web browsers require the R2 storage bucket to have a CORS policy allowing your web domain to perform HTTP <code className="bg-slate-800 px-1 py-0.5 rounded text-white font-mono">PUT</code> requests.
+              </p>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 space-y-2">
+              <div className="text-slate-300 font-semibold">Your Current Web App Origin:</div>
+              <div className="font-mono text-emerald-400 bg-slate-900 px-2.5 py-1.5 rounded-lg border border-slate-800 break-all select-all">
+                {typeof window !== 'undefined' ? window.location.origin : 'https://...'}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-200">Recommended CORS Policy (JSON):</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const corsJson = JSON.stringify(
+                      [
+                        {
+                          AllowedOrigins: ['*'],
+                          AllowedMethods: ['GET', 'PUT', 'HEAD', 'OPTIONS'],
+                          AllowedHeaders: ['*'],
+                          ExposeHeaders: ['ETag', 'Content-Length', 'x-amz-request-id'],
+                          MaxAgeSeconds: 3600,
+                        },
+                      ],
+                      null,
+                      2
+                    );
+                    navigator.clipboard.writeText(corsJson);
+                    setCopiedCors(true);
+                    showToast('CORS JSON copied to clipboard!', 'success');
+                    setTimeout(() => setCopiedCors(false), 2500);
+                  }}
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-semibold flex items-center gap-1.5 shadow-sm transition"
+                >
+                  {copiedCors ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedCors ? 'Copied!' : 'Copy CORS JSON'}</span>
+                </button>
+              </div>
+
+              <pre className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto leading-relaxed">
+{`[
+  {
+    "AllowedOrigins": [
+      "*"
+    ],
+    "AllowedMethods": [
+      "GET",
+      "PUT",
+      "HEAD",
+      "OPTIONS"
+    ],
+    "AllowedHeaders": [
+      "*"
+    ],
+    "ExposeHeaders": [
+      "ETag",
+      "Content-Length",
+      "x-amz-request-id"
+    ],
+    "MaxAgeSeconds": 3600
+  }
+]`}
+              </pre>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-2 text-slate-300">
+              <div className="font-semibold text-white">How to apply this in Cloudflare:</div>
+              <ol className="list-decimal list-inside space-y-1 text-slate-400 pl-1 leading-relaxed">
+                <li>Log in to your <strong>Cloudflare Dashboard</strong> (<a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 underline">dash.cloudflare.com</a>).</li>
+                <li>Go to <strong>R2 Object Storage</strong> → click your bucket (e.g. <code className="text-slate-200">sentinelops-projects</code>).</li>
+                <li>Click the <strong>Settings</strong> tab and scroll down to <strong>CORS Policy</strong>.</li>
+                <li>Click <strong>Add CORS policy</strong> (or <strong>Edit</strong>), paste the JSON above, and click <strong>Save</strong>.</li>
+                <li>Return to this page and click <strong>Retry</strong> on your upload queue.</li>
+              </ol>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setIsCorsModalOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 transition"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

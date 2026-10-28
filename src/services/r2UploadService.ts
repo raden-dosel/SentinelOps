@@ -464,7 +464,12 @@ function executeR2Put(
     };
 
     xhr.onerror = () => {
-      reject(new Error('Network error during direct PUT to Cloudflare R2. Check connection and bucket CORS policy.'));
+      const origin = typeof window !== 'undefined' ? window.location.origin : 'current origin';
+      reject(
+        new Error(
+          `Network error during direct PUT to Cloudflare R2. Cloudflare blocked the upload due to bucket CORS policy. Ensure '${origin}' or '*' is added to your R2 bucket CORS AllowedOrigins.`
+        )
+      );
     };
 
     xhr.ontimeout = () => {

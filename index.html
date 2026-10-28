@@ -18,6 +18,22 @@
     <link rel="apple-touch-icon" sizes="192x192" href="%BASE_URL%icons/icon-192.png" />
     <script>
       // Suppress Vite HMR / WebSocket client errors in Cloud Run / iframe proxy environment
+      (function () {
+        var origConsoleError = console.error;
+        console.error = function () {
+          var firstArg = arguments[0];
+          if (
+            typeof firstArg === 'string' &&
+            (firstArg.includes('[vite] failed to connect to websocket') ||
+              firstArg.includes('WebSocket (failing)') ||
+              firstArg.includes('Check out your Vite / network configuration'))
+          ) {
+            // Environment constraint: "HMR: Disabled. Ignore WebSocket errors."
+            return;
+          }
+          return origConsoleError.apply(console, arguments);
+        };
+      })();
       window.addEventListener('error', function (e) {
         if (
           e.message &&
