@@ -9,13 +9,158 @@ import { formatCurrency, fromCentavos, amountInWords } from '../domain/calculati
 
 // Helpers to format currency and clean strings
 function formatPhp(centavos: number): string {
-  return formatCurrency(centavos, true);
+  return formatCurrency(centavos, true).replace(/₱/g, 'PHP ');
 }
 
 /**
- * Generates an itemized Quotation PDF document
+ * Generates an itemized, paginated Quotation PDF document.
  */
 export async function generateQuotationPdf(
+  quotation: Quotation,
+  settings: AppSettings
+): Promise<Uint8Array> {
+  const pdfDoc = await PDFDocument.create();
+  const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const width = 595.28;
+  const height = 841.89;
+  const left = 40;
+  const right = width - 40;
+  const primary = rgb(0.06, 0.09, 0.16);
+  const accent = rgb(0.15, 0.39, 0.92);
+  const text = rgb(0.2, 0.25, 0.33);
+  const pale = rgb(0.94, 0.96, 0.98);
+  const border = rgb(0.85, 0.88, 0.92);
+  const white = rgb(1, 1, 1);
+
+  const wrap = (value: string, maxWidth: number, size: number): string[] => {
+    const words = value.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [''];
+    const lines: string[] = [];
+    let line = '';
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (regular.widthOfTextAtSize(candidate, size) <= maxWidth || !line) {
+        line = candidate;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  };
+
+  let page = pdfDoc.addPage([width, height]);
+  let y = height - 50;
+  const drawHeader = () => {
+    page.drawRectangle({ x: left, y: y - 55, width: right - left, height: 65, color: primary });
+    page.drawText(settings.businessName.toUpperCase(), { x: 55, y: y - 20, size: 13, font: bold, color: white });
+    page.drawText(settings.tagline, { x: 55, y: y - 36, size: 8, font: regular, color: rgb(0.8, 0.85, 0.9) });
+    page.drawText(quotation.revisionNumber > 0 ? `QUOTATION (REV ${quotation.revisionNumber})` : 'FORMAL QUOTATION', {
+      x: width - 230, y: y - 25, size: 12, font: bold, color: rgb(0.98, 0.75, 0.18),
+    });
+    page.drawText(`Ref: ${quotation.quotationNumber}`, { x: width - 230, y: y - 42, size: 10, font: bold, color: white });
+    y -= 80;
+  };
+  const drawTableHeader = () => {
+    page.drawRectangle({ x: left, y: y - 18, width: right - left, height: 22, color: primary });
+    const labels = [['NO.', 48], ['CATEGORY', 75], ['DESCRIPTION / SPECIFICATIONS', 150], ['QTY & UNIT', 380], ['UNIT PRICE (PHP)', 440], ['TOTAL (PHP)', 515]];
+    labels.forEach(([label, x]) => page.drawText(String(label), { x: Number(x), y: y - 12, size: 8, font: bold, color: white }));
+    y -= 22;
+  };
+  const newContentPage = () => {
+    page = pdfDoc.addPage([width, height]);
+    y = height - 50;
+    drawHeader();
+    drawTableHeader();
+  };
+  const drawWrapped = (value: string, x: number, maxWidth: number, size: number, color = text, font = regular, gap = 10) => {
+    const lines = wrap(value, maxWidth, size);
+    lines.forEach((line) => {
+      if (y < 85) newContentPage();
+      page.drawText(line, { x, y, size, font, color });
+      y -= gap;
+    });
+    return lines.length;
+  };
+
+  drawHeader();
+  page.drawText('FROM:', { x: left, y, size: 8, font: bold, color: accent });
+  drawWrapped(settings.businessName, left, 245, 9, primary, bold, 11);
+  drawWrapped(settings.address, left, 245, 8, text, regular, 10);
+  drawWrapped(`${settings.city}, ${settings.region}`, left, 245, 8, text, regular, 10);
+  drawWrapped(`Tel: ${settings.contactNumber} | Email: ${settings.email}`, left, 245, 8, text, regular, 10);
+  if (settings.tinNumber) drawWrapped(`TIN: ${settings.tinNumber}`, left, 245, 8, text, regular, 10);
+
+  let clientY = height - 130;
+  page.drawText('PREPARED FOR:', { x: 330, y: clientY, size: 8, font: bold, color: accent });
+  const drawClientLine = (value: string, size: number, clientFont = regular) => {
+    page.drawText(value, { x: 330, y: clientY - 12, size, font: clientFont, color: clientFont === bold ? primary : text });
+    clientY -= 11;
+  };
+  drawClientLine(quotation.clientName, 9, bold);
+  drawClientLine(quotation.clientAddress || 'Client Site Address', 8);
+  drawClientLine(`Contact: ${quotation.clientContact || 'N/A'}`, 8);
+  drawClientLine(`Date Issued: ${quotation.issueDate} | Valid Until: ${quotation.expiryDate}`, 8);
+  y = Math.min(y, clientY) - 18;
+
+  page.drawRectangle({ x: left, y: y - 24, width: right - left, height: 28, color: pale, borderColor: border, borderWidth: 1 });
+  page.drawText(`PROJECT / SERVICE: ${quotation.projectTitle.toUpperCase()}`, { x: 50, y: y - 16, size: 9, font: bold, color: primary });
+  y -= 40;
+  page.drawText('SCOPE OF WORK:', { x: left, y, size: 8, font: bold, color: primary });
+  y -= 12;
+  drawWrapped(quotation.scopeOfWork || 'No scope specified.', left, right - left, 7.5, text, regular, 10);
+  y -= 5;
+  drawTableHeader();
+
+  quotation.lineItems.forEach((item, index) => {
+    const descriptionLines = wrap(item.description, 220, 7.5);
+    const rowHeight = Math.max(20, descriptionLines.length * 10 + 6);
+    if (y - rowHeight < 110) newContentPage();
+    if (index % 2 === 0) page.drawRectangle({ x: left, y: y - rowHeight, width: right - left, height: rowHeight, color: pale });
+    page.drawText(`${index + 1}`, { x: 50, y: y - 13, size: 8, font: regular, color: text });
+    page.drawText(item.category || 'Materials', { x: 75, y: y - 13, size: 7.5, font: regular, color: text });
+    descriptionLines.forEach((line, lineIndex) => page.drawText(line, { x: 150, y: y - 11 - lineIndex * 10, size: 7.5, font: regular, color: primary }));
+    page.drawText(`${item.quantity} ${item.unit}`, { x: 380, y: y - 13, size: 7.5, font: regular, color: text });
+    page.drawText(fromCentavos(item.unitPriceCentavos).toFixed(2), { x: 440, y: y - 13, size: 7.5, font: regular, color: text });
+    page.drawText(fromCentavos(item.totalCentavos).toFixed(2), { x: 515, y: y - 13, size: 7.5, font: bold, color: primary });
+    y -= rowHeight;
+  });
+
+  if (y < 190) newContentPage();
+  page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 1, color: border });
+  y -= 14;
+  const totalsX = 380;
+  const drawTotal = (label: string, value: string) => {
+    page.drawText(label, { x: totalsX, y, size: 9, font: regular, color: text });
+    page.drawText(value, { x: 480, y, size: 9, font: regular, color: text });
+    y -= 15;
+  };
+  drawTotal('Subtotal:', formatPhp(quotation.subtotalCentavos));
+  if (quotation.taxMode !== 'NON_VAT') drawTotal(`VAT (${quotation.taxRatePercent}%):`, formatPhp(quotation.taxCentavos));
+  page.drawRectangle({ x: totalsX - 10, y: y - 8, width: right - totalsX - 30, height: 24, color: primary });
+  page.drawText('GRAND TOTAL:', { x: totalsX, y, size: 10, font: bold, color: white });
+  page.drawText(formatPhp(quotation.grandTotalCentavos), { x: 480, y, size: 10, font: bold, color: rgb(0.98, 0.75, 0.18) });
+  y -= 38;
+  page.drawText('TERMS & CONDITIONS:', { x: left, y, size: 8, font: bold, color: primary });
+  y -= 12;
+  drawWrapped(quotation.termsAndConditions || settings.defaultPaymentTerms, left, right - left, 7, text, regular, 10);
+  drawWrapped(settings.defaultWarrantyTerms, left, right - left, 7, text, regular, 10);
+  if (quotation.notes) {
+    y -= 4;
+    page.drawText('NOTES:', { x: left, y, size: 8, font: bold, color: primary });
+    y -= 12;
+    drawWrapped(quotation.notes, left, right - left, 7, text, regular, 10);
+  }
+  page.drawText('Authorized Signature / Date', { x: left, y: 58, size: 7.5, font: regular, color: text });
+  page.drawText('Client Conforme & Acceptance / Date', { x: width - 200, y: 58, size: 7.5, font: regular, color: text });
+  page.drawText('This is a computer-generated commercial quotation issued by SentinelOps. Not a valid tax receipt under Philippine BIR regulations.', { x: left, y: 30, size: 6.5, font: regular, color: rgb(0.5, 0.55, 0.6) });
+  return pdfDoc.save();
+}
+
+/** Legacy single-page renderer retained for reference during migration. */
+export async function generateQuotationPdfLegacy(
   quotation: Quotation,
   settings: AppSettings
 ): Promise<Uint8Array> {
@@ -750,7 +895,12 @@ export function printPdfBlob(pdfBytes: Uint8Array): void {
 /**
  * Share PDF file using Web Share API if supported, or fallback to download
  */
-export async function sharePdfBlob(pdfBytes: Uint8Array, fileName: string, title: string): Promise<boolean> {
+export async function sharePdfBlob(
+  pdfBytes: Uint8Array,
+  fileName: string,
+  title: string,
+  fallbackSummary?: string
+): Promise<boolean> {
   const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
   const file = new File([blob], fileName, { type: 'application/pdf' });
 
@@ -772,5 +922,12 @@ export async function sharePdfBlob(pdfBytes: Uint8Array, fileName: string, title
 
   // Fallback to direct download
   downloadPdfBlob(pdfBytes, fileName);
+  if (fallbackSummary && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(fallbackSummary);
+    } catch {
+      // Clipboard access is optional; the PDF download remains available.
+    }
+  }
   return true;
 }

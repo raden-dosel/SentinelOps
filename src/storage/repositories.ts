@@ -437,6 +437,56 @@ export const quotationRepository = {
     return record;
   },
 
+  async updateStatus(
+    id: ID,
+    nextStatus: Quotation['status'],
+    actorName = 'Admin'
+  ): Promise<Quotation> {
+    const db = await getDatabase();
+    const quotation = (await db.get('quotations', id)) as Quotation | undefined;
+    if (!quotation) throw new Error('Quotation not found');
+
+    const allowed =
+      (quotation.status === 'Draft' && (nextStatus === 'Sent' || nextStatus === 'Accepted')) ||
+      (quotation.status === 'Sent' && (nextStatus === 'Draft' || nextStatus === 'Accepted'));
+    if (!allowed) {
+      throw new Error(`Quotation cannot transition from ${quotation.status} to ${nextStatus}.`);
+    }
+
+    const previousStatus = quotation.status;
+    quotation.status = nextStatus;
+    quotation.updatedAt = new Date().toISOString();
+
+    const tx = safeTransaction(db, ['quotations', 'syncOutbox', 'auditEvents'], 'readwrite');
+    await tx.objectStore('quotations').put(quotation);
+    if (tx.objectStoreNames.contains('syncOutbox')) {
+      enqueueOutboxRecord(tx.objectStore('syncOutbox'), 'Quotation', quotation.id, 'upsert', quotation);
+    }
+
+    const action: AuditEvent['action'] = nextStatus === 'Sent'
+      ? 'QUOTATION_ISSUE'
+      : nextStatus === 'Accepted'
+        ? 'QUOTATION_ACCEPT'
+        : 'QUOTATION_UPDATE';
+    if (tx.objectStoreNames.contains('auditEvents')) {
+      await tx.objectStore('auditEvents').put({
+        id: generateUUID(),
+        timestamp: quotation.updatedAt,
+        action,
+        entityType: 'Quotation',
+        entityId: quotation.id,
+        entityLabel: quotation.quotationNumber,
+        actorId: 'admin',
+        actorName,
+        details: { previousStatus, status: nextStatus },
+      } satisfies AuditEvent);
+    }
+
+    await tx.done;
+    requestSync();
+    return quotation;
+  },
+
   async createRevision(
     quotationId: ID,
     reason: string,
@@ -598,6 +648,13 @@ export const invoiceRepository = {
     if (!db.objectStoreNames.contains('invoices')) return [];
     const invoices = (await db.getAllFromIndex('invoices', 'projectId', projectId)) as Invoice[];
     return invoices.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  },
+
+  async getByQuotationId(quotationId: ID): Promise<Invoice[]> {
+    const db = await getDatabase();
+    if (!db.objectStoreNames.contains('invoices')) return [];
+    const invoices = (await db.getAll('invoices')) as Invoice[];
+    return invoices.filter((invoice) => invoice.quotationId === quotationId);
   },
 
   async save(invoice: Invoice, actorName = 'Admin'): Promise<Invoice> {
@@ -889,6 +946,13 @@ export const projectRepository = {
     if (!db.objectStoreNames.contains('projects')) return [];
     const projects = (await db.getAllFromIndex('projects', 'clientId', clientId)) as Project[];
     return projects.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  },
+
+  async getByQuotationId(quotationId: ID): Promise<Project[]> {
+    const db = await getDatabase();
+    if (!db.objectStoreNames.contains('projects')) return [];
+    const projects = (await db.getAll('projects')) as Project[];
+    return projects.filter((project) => project.quotationId === quotationId);
   },
 
   async save(project: Project, actorName = 'Admin'): Promise<Project> {

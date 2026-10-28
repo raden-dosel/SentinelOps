@@ -62,6 +62,11 @@ interface QuotationsViewProps {
   onNavigateToProject?: (projectId: string) => void;
 }
 
+type PendingQuotationAction = {
+  kind: 'send' | 'accept' | 'invoice' | 'project';
+  quotation: Quotation;
+};
+
 export const QuotationsView: React.FC<QuotationsViewProps> = ({
   initialClientId,
   onNavigateToInvoice,
@@ -100,6 +105,8 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
 
   // PDF Preview & Busy states
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingQuotationAction | null>(null);
+  const [isActionPending, setIsActionPending] = useState(false);
 
   const serviceCategories: ServiceCategory[] = [
     'Electric Fence Installation',
@@ -392,9 +399,35 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
     }
   };
 
+  const handleQuotationStatusChange = async (quotation: Quotation, status: 'Draft' | 'Sent' | 'Accepted') => {
+    if (isActionPending) return;
+    try {
+      setIsActionPending(true);
+      await quotationRepository.updateStatus(quotation.id, status);
+      showToast(`Quotation ${status === 'Draft' ? 'reverted to Draft' : `marked as ${status}`}`, 'success');
+      await loadData();
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Failed to update quotation status', 'error');
+    } finally {
+      setIsActionPending(false);
+      setPendingAction(null);
+    }
+  };
+
   // Convert Accepted Quotation to Billing Invoice
   const handleConvertToInvoice = async (quotation: Quotation) => {
+    if (quotation.status !== 'Accepted') {
+      showToast('Only accepted quotations can be invoiced.', 'error');
+      return;
+    }
     try {
+      setIsActionPending(true);
+      const existingInvoices = await invoiceRepository.getByQuotationId(quotation.id);
+      if (quotation.convertedToInvoiceId || existingInvoices.length > 0) {
+        showToast(`Quotation already has invoice ${existingInvoices[0]?.invoiceNumber || quotation.convertedToInvoiceId}.`, 'info');
+        await loadData();
+        return;
+      }
       const settings = await settingsRepository.getSettings();
       const invNum = await getNextDocumentNumber(settings.invoicePrefix || 'INV-');
 
@@ -435,9 +468,8 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
         updatedAt: new Date().toISOString(),
       });
 
-      // Update quotation link
+      // Link the created invoice without changing the quotation status.
       quotation.convertedToInvoiceId = newInvoice.id;
-      quotation.status = 'Accepted';
       await quotationRepository.save(quotation);
 
       showToast(`Invoice ${invNum} created from quotation!`, 'success');
@@ -448,12 +480,26 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
       }
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Failed to generate invoice', 'error');
+    } finally {
+      setIsActionPending(false);
+      setPendingAction(null);
     }
   };
 
   // Convert Accepted Quotation to Project
   const handleConvertToProject = async (quotation: Quotation) => {
+    if (quotation.status !== 'Accepted') {
+      showToast('Only accepted quotations can start a project.', 'error');
+      return;
+    }
     try {
+      setIsActionPending(true);
+      const existingProjects = await projectRepository.getByQuotationId(quotation.id);
+      if (quotation.convertedToProjectId || existingProjects.length > 0) {
+        showToast(`Quotation already has project ${existingProjects[0]?.projectNumber || quotation.convertedToProjectId}.`, 'info');
+        await loadData();
+        return;
+      }
       const settings = await settingsRepository.getSettings();
       const prjNum = await getNextDocumentNumber(settings.projectPrefix || 'PRJ-');
 
@@ -488,7 +534,6 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
       });
 
       quotation.convertedToProjectId = newProject.id;
-      quotation.status = 'Accepted';
       await quotationRepository.save(quotation);
 
       showToast(`Project ${prjNum} created from quotation!`, 'success');
@@ -499,6 +544,9 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
       }
     } catch (err: unknown) {
       showToast(err instanceof Error ? err.message : 'Failed to create project', 'error');
+    } finally {
+      setIsActionPending(false);
+      setPendingAction(null);
     }
   };
 
@@ -536,11 +584,14 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
       setIsGeneratingPdf(true);
       const settings = await settingsRepository.getSettings();
       const pdfBytes = await generateQuotationPdf(quotation, settings);
-      await sharePdfBlob(
+      const shared = await sharePdfBlob(
         pdfBytes,
         `${quotation.quotationNumber}_Quotation.pdf`,
-        `Formal Quotation ${quotation.quotationNumber}`
+        `Formal Quotation ${quotation.quotationNumber}`,
+        `${quotation.quotationNumber} for ${quotation.clientName}\n${quotation.projectTitle}\nTotal: ${formatCurrency(quotation.grandTotalCentavos)}`
       );
+      if (shared) showToast('Quotation PDF is ready to share or download; its summary was copied when supported', 'success');
+      else showToast('Sharing cancelled. No message was sent.', 'info');
     } catch {
       showToast('Share failed', 'error');
     } finally {
@@ -667,20 +718,22 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
                     onClick={() => handleDownloadPdf(quotation)}
                     disabled={isGeneratingPdf}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-700 bg-slate-800/80 text-xs font-semibold text-slate-200 hover:text-white hover:bg-slate-700 transition"
-                    title="Download PDF"
+                    title="Print or export quotation as PDF"
                   >
                     <Download className="w-3.5 h-3.5 text-blue-400" />
-                    <span>PDF</span>
+                    <span>Export PDF</span>
                   </button>
                   <button
                     onClick={() => handlePrintPdf(quotation)}
+                    disabled={isGeneratingPdf}
                     className="p-1.5 rounded-xl border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700"
-                    title="Print Document"
+                    title="Print quotation"
                   >
                     <Printer className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => handleSharePdf(quotation)}
+                    disabled={isGeneratingPdf}
                     className="p-1.5 rounded-xl border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700"
                     title="Share via Tablet"
                   >
@@ -710,29 +763,24 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
 
                 <div className="flex items-center gap-2">
                   {/* Status Action Workflow */}
-                  {quotation.status === 'Draft' && (
+                  {(quotation.status === 'Draft' || quotation.status === 'Sent') && (
                     <button
-                      onClick={async () => {
-                        quotation.status = 'Sent';
-                        await quotationRepository.save(quotation);
-                        showToast(`Quotation marked as Sent`, 'success');
-                        await loadData();
-                      }}
+                      onClick={() => setPendingAction({
+                        kind: quotation.status === 'Draft' ? 'send' : 'send',
+                        quotation,
+                      })}
+                      disabled={isActionPending}
                       className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-600/20 text-blue-300 border border-blue-500/30 text-xs font-semibold hover:bg-blue-600/30"
                     >
                       <Send className="w-3.5 h-3.5" />
-                      <span>Mark Sent</span>
+                      <span>{quotation.status === 'Sent' ? 'Revert to Draft' : 'Mark as Sent'}</span>
                     </button>
                   )}
 
-                  {quotation.status !== 'Accepted' && quotation.status !== 'Declined' && (
+                  {(quotation.status === 'Draft' || quotation.status === 'Sent') && (
                     <button
-                      onClick={async () => {
-                        quotation.status = 'Accepted';
-                        await quotationRepository.save(quotation);
-                        showToast(`Quotation marked as Accepted!`, 'success');
-                        await loadData();
-                      }}
+                      onClick={() => setPendingAction({ kind: 'accept', quotation })}
+                      disabled={isActionPending}
                       className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 text-xs font-semibold hover:bg-emerald-600/30"
                     >
                       <CheckCircle2 className="w-3.5 h-3.5" />
@@ -743,7 +791,8 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
                   {/* Once Accepted: Convert to Invoice & Project triggers */}
                   {quotation.status === 'Accepted' && !quotation.convertedToInvoiceId && (
                     <button
-                      onClick={() => handleConvertToInvoice(quotation)}
+                      onClick={() => setPendingAction({ kind: 'invoice', quotation })}
+                      disabled={isActionPending}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md"
                     >
                       <Receipt className="w-3.5 h-3.5" />
@@ -753,7 +802,8 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
 
                   {quotation.status === 'Accepted' && !quotation.convertedToProjectId && (
                     <button
-                      onClick={() => handleConvertToProject(quotation)}
+                      onClick={() => setPendingAction({ kind: 'project', quotation })}
+                      disabled={isActionPending}
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md"
                     >
                       <Briefcase className="w-3.5 h-3.5" />
@@ -1238,6 +1288,60 @@ export const QuotationsView: React.FC<QuotationsViewProps> = ({
       )}
 
       {/* Delete Confirmation */}
+      {pendingAction && (
+        <ConfirmDialog
+          isOpen={!!pendingAction}
+          onClose={() => {
+            if (!isActionPending) setPendingAction(null);
+          }}
+          onConfirm={async () => {
+            if (pendingAction.kind === 'send') {
+              await handleQuotationStatusChange(
+                pendingAction.quotation,
+                pendingAction.quotation.status === 'Sent' ? 'Draft' : 'Sent'
+              );
+            } else if (pendingAction.kind === 'accept') {
+              await handleQuotationStatusChange(pendingAction.quotation, 'Accepted');
+            } else if (pendingAction.kind === 'invoice') {
+              await handleConvertToInvoice(pendingAction.quotation);
+            } else {
+              await handleConvertToProject(pendingAction.quotation);
+            }
+          }}
+          title={
+            pendingAction.kind === 'send'
+              ? pendingAction.quotation.status === 'Sent' ? 'Revert Quotation to Draft' : 'Mark Quotation as Sent'
+              : pendingAction.kind === 'accept'
+                ? 'Accept Quotation'
+                : pendingAction.kind === 'invoice'
+                  ? 'Create Invoice from Quotation'
+                  : 'Create and Start Project'
+          }
+          message={
+            pendingAction.kind === 'send'
+              ? pendingAction.quotation.status === 'Sent'
+                ? `Revert ${pendingAction.quotation.quotationNumber} for ${pendingAction.quotation.clientName} to Draft. The existing sent history will remain in the audit trail.`
+                : `Mark ${pendingAction.quotation.quotationNumber} for ${pendingAction.quotation.clientName} as Sent. This records the business status only; it does not send an email or message.`
+              : pendingAction.kind === 'accept'
+                ? `Accept ${pendingAction.quotation.quotationNumber} for ${pendingAction.quotation.clientName}? This changes the quotation status and enables invoice or project actions.`
+                : pendingAction.kind === 'invoice'
+                  ? `Create one new invoice for ${pendingAction.quotation.quotationNumber} (${formatCurrency(pendingAction.quotation.grandTotalCentavos)})? An invoice record will be saved and linked to this quotation.`
+                  : `Create and start a new Ongoing project for ${pendingAction.quotation.quotationNumber}, ${pendingAction.quotation.clientName}, using ${pendingAction.quotation.projectTitle}?`
+          }
+          confirmLabel={
+            pendingAction.kind === 'send'
+              ? pendingAction.quotation.status === 'Sent' ? 'Revert to Draft' : 'Confirm Sent'
+              : pendingAction.kind === 'accept'
+                ? 'Confirm Acceptance'
+                : pendingAction.kind === 'invoice'
+                  ? 'Create Invoice'
+                  : 'Create and Start Project'
+          }
+          variant={pendingAction.kind === 'send' ? 'info' : 'warning'}
+          isLoading={isActionPending}
+        />
+      )}
+
       {quoteToDelete && (
         <ConfirmDialog
           isOpen={!!quoteToDelete}

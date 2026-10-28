@@ -86,6 +86,82 @@ describe('Atomic Mutations and Durable Sync Outbox Integration', () => {
     expect((revisionOps[0].payload as any).reason).toBe('Added extra energizer unit');
   });
 
+  it('guards quotation status transitions and finds linked downstream records', async () => {
+    const quote = await quotationRepository.save({
+      id: 'quote-status-1',
+      quotationNumber: 'Q-2026-STATUS',
+      revisionNumber: 0,
+      clientId: 'client-status',
+      clientName: 'Status Client',
+      clientContact: '0917-000-0000',
+      clientAddress: 'Pasig',
+      projectTitle: 'Status Test Project',
+      serviceCategory: 'Maintenance Service',
+      scopeOfWork: 'Maintenance',
+      termsAndConditions: 'Due upon receipt',
+      issueDate: '2026-10-20',
+      expiryDate: '2026-11-20',
+      status: 'Draft',
+      lineItems: [],
+      subtotalCentavos: 10000,
+      taxRatePercent: 12,
+      taxCentavos: 1200,
+      grandTotalCentavos: 11200,
+      taxMode: 'EXCLUSIVE',
+      createdAt: '2026-10-20T00:00:00Z',
+      updatedAt: '2026-10-20T00:00:00Z',
+    });
+
+    expect((await quotationRepository.updateStatus(quote.id, 'Sent')).status).toBe('Sent');
+    expect((await quotationRepository.updateStatus(quote.id, 'Draft')).status).toBe('Draft');
+    expect((await quotationRepository.updateStatus(quote.id, 'Accepted')).status).toBe('Accepted');
+    await expect(quotationRepository.updateStatus(quote.id, 'Sent')).rejects.toThrow('cannot transition');
+
+    const invoice = await invoiceRepository.save({
+      id: 'invoice-status-1',
+      invoiceNumber: 'INV-2026-STATUS',
+      quotationId: quote.id,
+      quotationNumber: quote.quotationNumber,
+      clientId: quote.clientId,
+      clientName: quote.clientName,
+      clientContact: quote.clientContact,
+      clientAddress: quote.clientAddress,
+      issueDate: quote.issueDate,
+      dueDate: quote.expiryDate,
+      title: quote.projectTitle,
+      lineItems: [],
+      subtotalCentavos: quote.subtotalCentavos,
+      taxRatePercent: quote.taxRatePercent,
+      taxCentavos: quote.taxCentavos,
+      grandTotalCentavos: quote.grandTotalCentavos,
+      paidAmountCentavos: 0,
+      remainingBalanceCentavos: quote.grandTotalCentavos,
+      status: 'Issued',
+      taxMode: quote.taxMode,
+      createdAt: quote.createdAt,
+      updatedAt: quote.updatedAt,
+    });
+    const project = await projectRepository.save({
+      id: 'project-status-1',
+      projectNumber: 'PRJ-2026-STATUS',
+      clientId: quote.clientId,
+      clientName: quote.clientName,
+      name: quote.projectTitle,
+      serviceCategory: quote.serviceCategory,
+      siteAddress: quote.clientAddress,
+      description: quote.scopeOfWork,
+      scopeOfWork: quote.scopeOfWork,
+      quotationId: quote.id,
+      quotationNumber: quote.quotationNumber,
+      status: 'Ongoing',
+      progressNotes: [],
+      createdAt: quote.createdAt,
+      updatedAt: quote.updatedAt,
+    });
+    expect((await invoiceRepository.getByQuotationId(quote.id)).map((item) => item.id)).toContain(invoice.id);
+    expect((await projectRepository.getByQuotationId(quote.id)).map((item) => item.id)).toContain(project.id);
+  });
+
   it('enqueues Payment financial event and updated Invoice atomically without losing financial history', async () => {
     // Setup invoice
     const inv = await invoiceRepository.save({
