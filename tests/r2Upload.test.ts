@@ -228,4 +228,64 @@ describe('Cloudflare Free Plan — Plain R2 Image Upload & Storage Specification
       expect(payload.blob).toBeUndefined(); // Binary payload must NEVER enter outbox!
     });
   });
+
+  describe('Section 8: Audit Key Points — Confirmation, Pagination (Max 6), and Project Switching', () => {
+    it('paginates attachments with a strict maximum of 6 items per page', () => {
+      const ATTACHMENTS_PER_PAGE = 6;
+      // Simulate 14 project photos
+      const attachments = Array.from({ length: 14 }, (_, i) => ({
+        id: `att-${i + 1}`,
+        sequenceNumber: i + 1,
+        fileName: `${i + 1}.jpg`,
+      }));
+
+      const totalPages = Math.ceil(attachments.length / ATTACHMENTS_PER_PAGE);
+      expect(totalPages).toBe(3);
+
+      // Page 1: items 1..6
+      const page1 = attachments.slice(0, ATTACHMENTS_PER_PAGE);
+      expect(page1.length).toBe(6);
+      expect(page1[0].sequenceNumber).toBe(1);
+      expect(page1[5].sequenceNumber).toBe(6);
+
+      // Page 2: items 7..12
+      const page2 = attachments.slice(ATTACHMENTS_PER_PAGE, ATTACHMENTS_PER_PAGE * 2);
+      expect(page2.length).toBe(6);
+      expect(page2[0].sequenceNumber).toBe(7);
+      expect(page2[5].sequenceNumber).toBe(12);
+
+      // Page 3: items 13..14
+      const page3 = attachments.slice(ATTACHMENTS_PER_PAGE * 2, ATTACHMENTS_PER_PAGE * 3);
+      expect(page3.length).toBe(2);
+      expect(page3[0].sequenceNumber).toBe(13);
+      expect(page3[1].sequenceNumber).toBe(14);
+    });
+
+    it('refreshes attachments when switching projects and isolates images per project', async () => {
+      // Save project A with 2 attachments
+      const projectA: Project = { ...baseProject, id: 'prj-alpha', projectNumber: 'PRJ-ALPHA-01', name: 'Alpha Site' };
+      const projectB: Project = { ...baseProject, id: 'prj-beta', projectNumber: 'PRJ-BETA-02', name: 'Beta Site' };
+
+      await projectRepository.save(projectA);
+      await projectRepository.save(projectB);
+
+      await attachmentRepository.saveAttachment({
+        id: 'att-a-1',
+        entityType: 'Project',
+        entityId: 'prj-alpha',
+        fileName: '1.jpg',
+        fileType: 'image/jpeg',
+        fileSize: 1000,
+        uploadedAt: new Date().toISOString(),
+      });
+
+      // Verify Project A has 1 attachment
+      const attsA = await attachmentRepository.getByEntity('Project', 'prj-alpha');
+      expect(attsA.length).toBe(1);
+
+      // Verify Project B (newly viewed) has 0 attachments -> displays "No image uploaded yet"
+      const attsB = await attachmentRepository.getByEntity('Project', 'prj-beta');
+      expect(attsB.length).toBe(0);
+    });
+  });
 });

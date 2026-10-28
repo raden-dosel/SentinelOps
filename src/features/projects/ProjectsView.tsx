@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Project,
   ProjectStatus,
@@ -48,13 +48,20 @@ import {
   AlertTriangle,
   Copy,
   Info,
+  ChevronLeft,
+  ChevronRight,
+  ImageOff,
+  X,
 } from 'lucide-react';
 import { useConnectivity, OFFLINE_WARNING, API_UNREACHABLE_WARNING } from '../../hooks/useConnectivity';
 import {
   buildProjectImageName,
   getAttachmentDisplayName,
+  getNextSequenceNumber,
+  buildNumberedImageFileName,
 } from './projectImageNaming';
 import {
+  validateImageFile,
   prepareR2UploadItems,
   uploadSingleFileToR2,
   requestPresignedDownloadUrl,
@@ -115,6 +122,29 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   const [isCorsModalOpen, setIsCorsModalOpen] = useState(false);
   const [copiedCors, setCopiedCors] = useState(false);
 
+  // Pending Upload Confirmation State
+  const [isUploadConfirmOpen, setIsUploadConfirmOpen] = useState(false);
+  const [pendingUploadItems, setPendingUploadItems] = useState<
+    Array<{
+      id: string;
+      file: File;
+      previewUrl: string;
+      sequenceNumber: number;
+      displayName: string;
+      sizeFormatted: string;
+    }>
+  >([]);
+  const [pendingUploadDestination, setPendingUploadDestination] = useState<'r2' | 'local'>('r2');
+  const r2FileInputRef = useRef<HTMLInputElement | null>(null);
+  const localFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Pagination for Site Photos & Attachments (Max 6 displayed)
+  const ATTACHMENTS_PER_PAGE = 6;
+  const [attachmentPage, setAttachmentPage] = useState(1);
+  const [isLoadingAttachments, setIsLoadingAttachments] = useState(false);
+  const selectedProjectRef = useRef<Project | null>(selectedProject);
+  selectedProjectRef.current = selectedProject;
+
   const projectStatuses: ProjectStatus[] = [
     'Planning',
     'Survey',
@@ -156,14 +186,18 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
 
   const loadProjectAttachments = async (projectId: string) => {
     try {
+      setIsLoadingAttachments(true);
       const atts = await attachmentRepository.getByEntity('Project', projectId);
-      setProjectAttachments(atts);
+      if (selectedProjectRef.current?.id === projectId) {
+        setProjectAttachments(atts);
+        setAttachmentPage(1);
+      }
 
       // Pre-fetch presigned download URLs for any R2 attachment without local blob
       atts.forEach((att) => {
         if (att.storageProvider === 'cloudflare-r2' && !att.blob && !remoteImageUrls[att.id]) {
           void requestPresignedDownloadUrl(projectId, att.id, att.fileName).then((url) => {
-            if (url) {
+            if (url && selectedProjectRef.current?.id === projectId) {
               setRemoteImageUrls((prev) => ({ ...prev, [att.id]: url }));
             }
           });
@@ -171,11 +205,19 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
       });
     } catch {
       console.warn('Failed to load attachments');
+    } finally {
+      if (selectedProjectRef.current?.id === projectId) {
+        setIsLoadingAttachments(false);
+      }
     }
   };
 
   const handleSelectProject = (project: Project) => {
     setSelectedProject(project);
+    setProjectAttachments([]); // Instantly clear previous project's attachments
+    setAttachmentPage(1);      // Reset pagination page to 1
+    setRemoteImageUrls({});    // Reset cached presigned URLs
+    setUploadBatch([]);        // Reset batch queue
     loadProjectAttachments(project.id);
   };
 
@@ -304,38 +346,177 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
     }
   };
 
-  // Direct Cloudflare R2 Upload Handler (Online & SentinelOps API reachable only)
-  const handleR2FilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  // Direct Cloudflare R2 Upload: user selects images first -> opens Confirmation Modal
+  const handleR2FilesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0 || !selectedProject) return;
 
     if (connectivity.status !== 'ready') {
       showToast(connectivity.errorMessage || 'Cannot upload to Cloudflare R2 at this time.', 'error');
+      if (r2FileInputRef.current) r2FileInputRef.current.value = '';
       return;
     }
 
     const files = Array.from(fileList);
-    const preparedItems = prepareR2UploadItems(files, selectedProject, projectAttachments);
-    setUploadBatch(preparedItems);
-    setIsBatchUploading(true);
-
-    try {
-      for (let i = 0; i < preparedItems.length; i++) {
-        const item = preparedItems[i];
-        await uploadSingleFileToR2(item, selectedProject, (updated) => {
-          setUploadBatch((prev) =>
-            prev.map((it) => (it.id === updated.id ? updated : it))
-          );
-        });
+    for (const f of files) {
+      const val = validateImageFile(f);
+      if (!val.valid) {
+        showToast(val.error || `File "${f.name}" is invalid`, 'error');
+        if (r2FileInputRef.current) r2FileInputRef.current.value = '';
+        return;
       }
+    }
 
-      showToast('Cloudflare R2 upload processing completed', 'success');
-      await loadProjectAttachments(selectedProject.id);
-    } catch {
-      showToast('Error during image batch upload to Cloudflare R2', 'error');
-    } finally {
-      setIsBatchUploading(false);
-      e.target.value = '';
+    if (projectAttachments.length + files.length > 50) {
+      showToast(`Cannot add ${files.length} images. Project limit is 50 images (currently has ${projectAttachments.length}).`, 'error');
+      if (r2FileInputRef.current) r2FileInputRef.current.value = '';
+      return;
+    }
+
+    let nextSeq = getNextSequenceNumber(projectAttachments);
+    const pending = files.map((file) => {
+      const seq = nextSeq++;
+      return {
+        id: Math.random().toString(36).substring(2, 9),
+        file,
+        previewUrl: URL.createObjectURL(file),
+        sequenceNumber: seq,
+        displayName: buildNumberedImageFileName(seq, file.type || 'image/jpeg'),
+        sizeFormatted: formatFileSize(file.size),
+      };
+    });
+
+    setPendingUploadItems(pending);
+    setPendingUploadDestination('r2');
+    setIsUploadConfirmOpen(true);
+  };
+
+  // Local Storage Upload: user selects files first -> opens Confirmation Modal
+  const handleLocalFilesSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0 || !selectedProject) return;
+
+    const files = Array.from(fileList);
+    for (const f of files) {
+      if (f.size > 15 * 1024 * 1024) {
+        showToast(`File "${f.name}" exceeds 15MB limit.`, 'error');
+        if (localFileInputRef.current) localFileInputRef.current.value = '';
+        return;
+      }
+    }
+
+    let nextSeq = getNextSequenceNumber(projectAttachments);
+    const pending = files.map((file) => {
+      const seq = nextSeq++;
+      return {
+        id: Math.random().toString(36).substring(2, 9),
+        file,
+        previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : '',
+        sequenceNumber: seq,
+        displayName: file.name,
+        sizeFormatted: formatFileSize(file.size),
+      };
+    });
+
+    setPendingUploadItems(pending);
+    setPendingUploadDestination('local');
+    setIsUploadConfirmOpen(true);
+  };
+
+  const handleCancelPendingUpload = () => {
+    pendingUploadItems.forEach((it) => {
+      if (it.previewUrl) URL.revokeObjectURL(it.previewUrl);
+    });
+    setPendingUploadItems([]);
+    setIsUploadConfirmOpen(false);
+    if (r2FileInputRef.current) r2FileInputRef.current.value = '';
+    if (localFileInputRef.current) localFileInputRef.current.value = '';
+  };
+
+  const handleRemovePendingItem = (id: string) => {
+    setPendingUploadItems((prev) => {
+      const target = prev.find((it) => it.id === id);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      const remaining = prev.filter((it) => it.id !== id);
+      if (remaining.length === 0) {
+        setIsUploadConfirmOpen(false);
+        if (r2FileInputRef.current) r2FileInputRef.current.value = '';
+        if (localFileInputRef.current) localFileInputRef.current.value = '';
+      }
+      return remaining;
+    });
+  };
+
+  const handleSubmitPendingUpload = async () => {
+    if (!selectedProject || pendingUploadItems.length === 0) {
+      handleCancelPendingUpload();
+      return;
+    }
+
+    const itemsToUpload = [...pendingUploadItems];
+    const destination = pendingUploadDestination;
+
+    // Close confirmation dialog & clean input elements
+    setIsUploadConfirmOpen(false);
+    setPendingUploadItems([]);
+    if (r2FileInputRef.current) r2FileInputRef.current.value = '';
+    if (localFileInputRef.current) localFileInputRef.current.value = '';
+
+    if (destination === 'r2') {
+      const files = itemsToUpload.map((it) => it.file);
+      const preparedItems = prepareR2UploadItems(files, selectedProject, projectAttachments);
+      setUploadBatch(preparedItems);
+      setIsBatchUploading(true);
+
+      try {
+        for (let i = 0; i < preparedItems.length; i++) {
+          const item = preparedItems[i];
+          await uploadSingleFileToR2(item, selectedProject, (updated) => {
+            setUploadBatch((prev) =>
+              prev.map((it) => (it.id === updated.id ? updated : it))
+            );
+          });
+        }
+        showToast('Images uploaded to Cloudflare R2 successfully', 'success');
+        await loadProjectAttachments(selectedProject.id);
+      } catch {
+        showToast('Error during image upload to Cloudflare R2', 'error');
+      } finally {
+        setIsBatchUploading(false);
+      }
+    } else {
+      try {
+        setIsUploading(true);
+        for (const it of itemsToUpload) {
+          const attRecord: AttachmentRecord = {
+            id: it.id || Math.random().toString(36).substring(2, 9),
+            entityType: 'Project',
+            entityId: selectedProject.id,
+            fileName: it.file.name,
+            fileType: it.file.type || 'application/octet-stream',
+            fileSize: it.file.size,
+            caption: attachmentCaption || it.file.name,
+            uploadedAt: new Date().toISOString(),
+            sequenceNumber: it.sequenceNumber,
+            storageProvider: 'local',
+            blob: it.file,
+          };
+          await attachmentRepository.saveAttachment(attRecord);
+        }
+        showToast(`Saved ${itemsToUpload.length} attachment(s) to local storage`, 'success');
+        setAttachmentCaption('');
+        await loadProjectAttachments(selectedProject.id);
+      } catch {
+        showToast('Failed to save attachments to local storage', 'error');
+      } finally {
+        setIsUploading(false);
+      }
     }
   };
 
@@ -386,43 +567,6 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
       await loadProjectAttachments(selectedProject.id);
     } catch {
       showToast('Failed to save photo locally', 'error');
-    }
-  };
-
-  // Upload Local Photo / Document (Available offline & online)
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !selectedProject) return;
-
-    // Check size limit: 15MB
-    if (file.size > 15 * 1024 * 1024) {
-      showToast('File size exceeds 15MB limit. Please choose a smaller photo.', 'error');
-      return;
-    }
-
-    try {
-      setIsUploading(true);
-      const attRecord: AttachmentRecord = {
-        id: Math.random().toString(36).substring(2, 9),
-        entityType: 'Project',
-        entityId: selectedProject.id,
-        fileName: file.name,
-        fileType: file.type || 'application/octet-stream',
-        fileSize: file.size,
-        caption: attachmentCaption || file.name,
-        uploadedAt: new Date().toISOString(),
-        storageProvider: 'local',
-        blob: file,
-      };
-
-      await attachmentRepository.saveAttachment(attRecord);
-      showToast('Attachment saved directly to local storage', 'success');
-      setAttachmentCaption('');
-      await loadProjectAttachments(selectedProject.id);
-    } catch {
-      showToast('Failed to save file attachment', 'error');
-    } finally {
-      setIsUploading(false);
     }
   };
 
@@ -705,6 +849,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                     <CloudUpload className="w-3.5 h-3.5" />
                     <span>{isBatchUploading ? 'Uploading...' : 'Upload to Cloudflare R2'}</span>
                     <input
+                      ref={r2FileInputRef}
                       type="file"
                       multiple
                       accept="image/jpeg,image/png,image/webp"
@@ -719,9 +864,11 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                     <Upload className="w-3.5 h-3.5 text-emerald-400" />
                     <span>{isUploading ? 'Saving...' : 'Add Local Photo'}</span>
                     <input
+                      ref={localFileInputRef}
                       type="file"
+                      multiple
                       accept="image/*,application/pdf"
-                      onChange={handleFileUpload}
+                      onChange={handleLocalFilesSelected}
                       disabled={isUploading}
                       className="hidden"
                     />
@@ -898,92 +1045,167 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
               )}
 
               {/* Attachments Gallery */}
-              {projectAttachments.length === 0 ? (
-                <p className="text-xs text-slate-500 italic p-3 rounded-xl bg-slate-800/30">
-                  No site photos or files attached to this project yet. Use "Upload to Cloudflare R2" or "Add Local Photo" to attach photos.
-                </p>
+              {isLoadingAttachments ? (
+                <div className="flex items-center justify-center p-8 rounded-2xl bg-slate-800/20 text-slate-400 text-xs">
+                  <RefreshCw className="w-4 h-4 animate-spin mr-2 text-blue-400" />
+                  <span>Refreshing site photos...</span>
+                </div>
+              ) : projectAttachments.length === 0 ? (
+                <div className="flex flex-col items-center justify-center p-8 rounded-2xl border-2 border-dashed border-slate-700/60 bg-slate-800/20 text-center space-y-2">
+                  <div className="w-12 h-12 rounded-2xl bg-slate-800/80 border border-slate-700/60 flex items-center justify-center text-slate-400">
+                    <ImageOff className="w-6 h-6 text-slate-400" />
+                  </div>
+                  <h5 className="text-sm font-bold text-slate-200">No image uploaded yet</h5>
+                  <p className="text-xs text-slate-400 max-w-sm">
+                    This project has no site photos or attachments attached. Use &quot;Upload to Cloudflare R2&quot; or &quot;Add Local Photo&quot; to attach site photos.
+                  </p>
+                </div>
               ) : (
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                  {projectAttachments.map((att) => {
-                    const isImg = att.fileType.startsWith('image/');
-                    const isR2 = att.storageProvider === 'cloudflare-r2' || Boolean(att.r2ObjectKey);
-                    const isCloudinary = att.storageProvider === 'cloudinary' || Boolean(att.cloudinaryUrl);
-                    const url =
-                      (isImg && att.blob ? URL.createObjectURL(att.blob) : null) ||
-                      remoteImageUrls[att.id] ||
-                      att.cloudinaryUrl ||
-                      null;
-                    const derivedDisplayName = getAttachmentDisplayName(att, selectedProject);
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {projectAttachments
+                      .slice(
+                        (attachmentPage - 1) * ATTACHMENTS_PER_PAGE,
+                        attachmentPage * ATTACHMENTS_PER_PAGE
+                      )
+                      .map((att) => {
+                        const isImg = att.fileType.startsWith('image/');
+                        const isR2 = att.storageProvider === 'cloudflare-r2' || Boolean(att.r2ObjectKey);
+                        const isCloudinary = att.storageProvider === 'cloudinary' || Boolean(att.cloudinaryUrl);
+                        const url =
+                          (isImg && att.blob ? URL.createObjectURL(att.blob) : null) ||
+                          remoteImageUrls[att.id] ||
+                          att.cloudinaryUrl ||
+                          null;
+                        const derivedDisplayName = getAttachmentDisplayName(att, selectedProject);
 
-                    return (
-                      <div
-                        key={att.id}
-                        className="group relative rounded-xl border border-slate-700 bg-slate-800/80 overflow-hidden flex flex-col"
-                      >
-                        {isImg && url ? (
+                        return (
                           <div
-                            onClick={() => setPreviewImageUrl(url)}
-                            className="h-28 bg-slate-900 cursor-pointer overflow-hidden flex items-center justify-center relative"
+                            key={att.id}
+                            className="group relative rounded-xl border border-slate-700 bg-slate-800/80 overflow-hidden flex flex-col"
                           >
-                            <img
-                              src={url}
-                              alt={derivedDisplayName}
-                              className="w-full h-full object-cover group-hover:scale-105 transition"
-                            />
-                            {/* Storage Provider & Sequence Badge */}
-                            <div className="absolute top-1.5 left-1.5 flex items-center gap-1">
-                              {typeof att.sequenceNumber === 'number' && (
-                                <span className="px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[9px] font-bold text-white">
-                                  #{att.sequenceNumber}
-                                </span>
-                              )}
-                              <span
-                                className={`px-1.5 py-0.5 rounded text-[9px] font-bold flex items-center gap-1 backdrop-blur-sm ${
-                                  isR2
-                                    ? 'bg-blue-600/90 text-white'
-                                    : isCloudinary
-                                    ? 'bg-purple-600/90 text-white'
-                                    : 'bg-emerald-600/90 text-white'
-                                }`}
+                            {isImg && url ? (
+                              <div
+                                onClick={() => setPreviewImageUrl(url)}
+                                className="h-28 bg-slate-900 cursor-pointer overflow-hidden flex items-center justify-center relative"
                               >
-                                {isR2 || isCloudinary ? <Cloud className="w-2.5 h-2.5" /> : null}
-                                <span>{isR2 ? 'Cloudflare R2' : isCloudinary ? 'Cloudinary' : 'Local'}</span>
-                              </span>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="h-28 bg-slate-900 flex items-center justify-center text-slate-500 text-xs font-semibold relative">
-                            <span>Document / PDF</span>
-                            {typeof att.sequenceNumber === 'number' && (
-                              <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-slate-800 text-[9px] font-bold text-slate-300">
-                                #{att.sequenceNumber}
-                              </span>
-                            )}
-                          </div>
-                        )}
-
-                        <div className="p-2 text-[11px] truncate flex items-center justify-between bg-slate-900/60">
-                          <div className="min-w-0 pr-1">
-                            <div className="truncate font-semibold text-slate-200" title={att.r2FolderName ? `${att.r2FolderName}/${att.fileName}` : derivedDisplayName}>
-                              {att.storageProvider === 'cloudflare-r2' ? att.fileName : derivedDisplayName}
-                            </div>
-                            {att.r2FolderName && (
-                              <div className="text-[10px] text-slate-400 truncate" title={`Folder: ${att.r2FolderName}`}>
-                                {att.r2FolderName}
+                                <img
+                                  src={url}
+                                  alt={derivedDisplayName}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition"
+                                />
+                                {/* Storage Provider & Sequence Badge */}
+                                <div className="absolute top-1.5 left-1.5 flex items-center gap-1">
+                                  {typeof att.sequenceNumber === 'number' && (
+                                    <span className="px-1.5 py-0.5 rounded bg-black/70 backdrop-blur-sm text-[9px] font-bold text-white">
+                                      #{att.sequenceNumber}
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[9px] font-bold flex items-center gap-1 backdrop-blur-sm ${
+                                      isR2
+                                        ? 'bg-blue-600/90 text-white'
+                                        : isCloudinary
+                                        ? 'bg-purple-600/90 text-white'
+                                        : 'bg-emerald-600/90 text-white'
+                                    }`}
+                                  >
+                                    {isR2 || isCloudinary ? <Cloud className="w-2.5 h-2.5" /> : null}
+                                    <span>{isR2 ? 'Cloudflare R2' : isCloudinary ? 'Cloudinary' : 'Local'}</span>
+                                  </span>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="h-28 bg-slate-900 flex items-center justify-center text-slate-500 text-xs font-semibold relative">
+                                <span>Document / PDF</span>
+                                {typeof att.sequenceNumber === 'number' && (
+                                  <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-slate-800 text-[9px] font-bold text-slate-300">
+                                    #{att.sequenceNumber}
+                                  </span>
+                                )}
                               </div>
                             )}
+
+                            <div className="p-2 text-[11px] truncate flex items-center justify-between bg-slate-900/60">
+                              <div className="min-w-0 pr-1">
+                                <div className="truncate font-semibold text-slate-200" title={att.r2FolderName ? `${att.r2FolderName}/${att.fileName}` : derivedDisplayName}>
+                                  {att.storageProvider === 'cloudflare-r2' ? att.fileName : derivedDisplayName}
+                                </div>
+                                {att.r2FolderName && (
+                                  <div className="text-[10px] text-slate-400 truncate" title={`Folder: ${att.r2FolderName}`}>
+                                    {att.r2FolderName}
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                onClick={() => handleDeleteAttachment(att.id)}
+                                className="text-rose-400 hover:text-rose-300 p-1 shrink-0"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
                           </div>
-                          <button
-                            onClick={() => handleDeleteAttachment(att.id)}
-                            className="text-rose-400 hover:text-rose-300 p-1 shrink-0"
-                            title="Delete"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
+                        );
+                      })}
+                  </div>
+
+                  {/* Pagination Controls: max 6 displayed per page */}
+                  {projectAttachments.length > ATTACHMENTS_PER_PAGE && (
+                    <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 pt-3 border-t border-slate-800 text-xs">
+                      <div className="text-slate-400 text-[11px]">
+                        Showing <span className="font-semibold text-slate-200">{(attachmentPage - 1) * ATTACHMENTS_PER_PAGE + 1}</span>–
+                        <span className="font-semibold text-slate-200">{Math.min(attachmentPage * ATTACHMENTS_PER_PAGE, projectAttachments.length)}</span> of{' '}
+                        <span className="font-semibold text-slate-200">{projectAttachments.length}</span> photos (max 6 per page)
                       </div>
-                    );
-                  })}
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={attachmentPage <= 1}
+                          onClick={() => setAttachmentPage((prev) => Math.max(1, prev - 1))}
+                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 border border-slate-700 flex items-center gap-1 font-semibold transition"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                          <span>Prev</span>
+                        </button>
+
+                        {Array.from(
+                          { length: Math.ceil(projectAttachments.length / ATTACHMENTS_PER_PAGE) },
+                          (_, i) => i + 1
+                        ).map((pg) => (
+                          <button
+                            key={pg}
+                            type="button"
+                            onClick={() => setAttachmentPage(pg)}
+                            className={`w-7 h-7 rounded-lg text-xs font-bold transition flex items-center justify-center ${
+                              attachmentPage === pg
+                                ? 'bg-blue-600 text-white shadow-sm'
+                                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700'
+                            }`}
+                          >
+                            {pg}
+                          </button>
+                        ))}
+
+                        <button
+                          type="button"
+                          disabled={
+                            attachmentPage >= Math.ceil(projectAttachments.length / ATTACHMENTS_PER_PAGE)
+                          }
+                          onClick={() =>
+                            setAttachmentPage((prev) =>
+                              Math.min(Math.ceil(projectAttachments.length / ATTACHMENTS_PER_PAGE), prev + 1)
+                            )
+                          }
+                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 border border-slate-700 flex items-center gap-1 font-semibold transition"
+                        >
+                          <span>Next</span>
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1252,6 +1474,118 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 transition"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Upload Confirmation Modal */}
+      {isUploadConfirmOpen && (
+        <Modal
+          isOpen={isUploadConfirmOpen}
+          onClose={handleCancelPendingUpload}
+          title="Confirm Image Upload"
+          subtitle={`Review selected images before uploading to ${selectedProject?.name || 'project'}`}
+          maxWidth="2xl"
+        >
+          <div className="space-y-4 text-xs">
+            {/* Target Destination & Details Banner */}
+            <div className="p-3 rounded-xl bg-slate-800/80 border border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <span className="text-[11px] text-slate-400 block">Target Project:</span>
+                <span className="font-bold text-white text-sm">
+                  {selectedProject?.projectNumber} — {selectedProject?.name}
+                </span>
+              </div>
+              <div className="shrink-0">
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold ${
+                    pendingUploadDestination === 'r2'
+                      ? 'bg-blue-600/20 text-blue-300 border border-blue-500/30'
+                      : 'bg-emerald-600/20 text-emerald-300 border border-emerald-500/30'
+                  }`}
+                >
+                  <CloudUpload className="w-3.5 h-3.5" />
+                  <span>{pendingUploadDestination === 'r2' ? 'Cloudflare R2 Bucket' : 'Local Storage'}</span>
+                </span>
+              </div>
+            </div>
+
+            {/* Selected Images Grid Preview */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-slate-300 font-semibold">
+                <span>Selected Photos ({pendingUploadItems.length})</span>
+                <span className="text-[11px] text-slate-400 font-normal">
+                  Total Size:{' '}
+                  {formatFileSize(
+                    pendingUploadItems.reduce((acc, it) => acc + it.file.size, 0)
+                  )}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-h-72 overflow-y-auto p-1 pr-2">
+                {pendingUploadItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="relative rounded-xl border border-slate-700 bg-slate-900 overflow-hidden flex flex-col group"
+                  >
+                    <div className="h-28 bg-slate-950 flex items-center justify-center overflow-hidden relative">
+                      {item.previewUrl ? (
+                        <img
+                          src={item.previewUrl}
+                          alt={item.displayName}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <span className="text-slate-500 text-xs font-semibold">
+                          Document / File
+                        </span>
+                      )}
+
+                      <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/80 backdrop-blur-sm text-[9px] font-bold text-white">
+                        #{item.sequenceNumber}
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() => handleRemovePendingItem(item.id)}
+                        className="absolute top-1.5 right-1.5 p-1 rounded-lg bg-rose-600/80 hover:bg-rose-600 text-white transition shadow-sm"
+                        title="Remove image from selection"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    <div className="p-2 bg-slate-900/90 flex flex-col justify-between text-[11px]">
+                      <div className="truncate font-semibold text-slate-200" title={item.displayName}>
+                        {item.displayName}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        {item.sizeFormatted}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Confirmation Action Buttons */}
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={handleCancelPendingUpload}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmitPendingUpload}
+                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 shadow-md shadow-blue-600/20 transition flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Submit</span>
               </button>
             </div>
           </div>
