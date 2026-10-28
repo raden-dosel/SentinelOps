@@ -10,6 +10,7 @@ export default defineConfig(() => {
       react(),
       tailwindcss(),
       VitePWA({
+        disable: process.env.NODE_ENV !== 'production',
         registerType: 'prompt',
         includeAssets: ['icons/*.png'],
         manifest: {
@@ -50,8 +51,7 @@ export default defineConfig(() => {
           navigateFallback: 'index.html',
         },
         devOptions: {
-          enabled: true,
-          type: 'module'
+          enabled: false
         }
       })
     ],
@@ -63,7 +63,8 @@ export default defineConfig(() => {
     server: {
       port: 3000,
       host: '0.0.0.0',
-      hmr: process.env.DISABLE_HMR !== 'true',
+      hmr: false as const,
+      ws: false as const,
     },
   };
 });
