@@ -1,0 +1,413 @@
+# Machine-Ready Implementation Prompt: Apply `INVOICE_TEMPLATE_DESIGN.md` to the Application’s Document Templates
+
+## Role
+
+Act as a **Principal Document-Design Engineer, Senior Full-Stack Engineer, PDF/Print Rendering Specialist, and QA Engineer**. You are responsible for adapting the application’s existing document templates to the design principles and implementation guidance in `INVOICE_TEMPLATE_DESIGN.md` while preserving the application’s architecture, data contracts, business rules, and existing functionality.
+
+Work directly in the repository using the tools available to you. Do not merely provide advice or a proposed patch: inspect the codebase, implement the appropriate changes, test the generated documents, and report the verified results.
+
+## Objective
+
+Read `INVOICE_TEMPLATE_DESIGN.md` in full, then modify the application’s existing document templates so they adopt the document design system described in that file.
+
+The invoice design is the primary reference. Where appropriate, apply its shared visual language to related document templates (such as quotations, payment receipts, statements, or project reports) while preserving each document’s purpose-specific fields and workflow. Do **not** copy invoice-only content into documents where it does not belong.
+
+The result must be professional, compact, readable, consistent across related documents, accurate for financial information, and reliable when printed or exported to PDF.
+
+---
+
+## 1. Mandatory Initial Audit — Before Editing
+
+Perform a read-only inspection first. Do not modify files until you understand the existing implementation.
+
+### Inspect the design reference
+
+Read `INVOICE_TEMPLATE_DESIGN.md` completely. Treat it as the source of the intended design direction, including its page geometry, typographic hierarchy, branding, color use, compact layout, rendering constraints, and developer watchouts.
+
+### Inspect the actual repository
+
+Identify and inspect:
+
+- All document templates and shared template styles.
+- The code that selects, populates, and renders each template.
+- The data schemas/models and validation rules used by each document.
+- PDF generation libraries and their actual versions.
+- Static assets, including logos and fonts.
+- Existing preview, printing, download, and sharing flows.
+- Tests, fixtures, representative example documents, and CI commands.
+- Any existing design tokens or reusable components that should be retained.
+
+Search the repository rather than assuming the paths in the design document are correct for the current project.
+
+### Confirm renderer compatibility
+
+The reference document describes `app/templates/invoice.html`, `app/templates/styles.css`, Jinja, `app/services/pdf_builder.py`, and WeasyPrint. Verify whether those files and technologies are present in the target repository.
+
+- If the application uses Jinja and WeasyPrint, follow the applicable reference details directly.
+- If the application uses a different renderer (for example, React, `pdf-lib`, a browser print stylesheet, or another PDF library), translate the design intent into the existing stack.
+- Do **not** introduce Jinja, WeasyPrint, another PDF library, or a new rendering architecture merely because it appears in the reference document.
+- If the design reference belongs to a different application or the applicable template subsystem cannot be identified, report the mismatch before making risky or unrelated changes. Continue with changes that can be mapped safely to the existing document system.
+
+### Baseline capture
+
+Before editing, record:
+
+- Git working-tree status and existing user changes.
+- Current document template inventory.
+- Current generation/render commands and relevant test commands.
+- A baseline PDF or print preview for each affected document type, if feasible.
+- Known existing defects and warnings.
+
+Do not overwrite, reset, discard, or reformat unrelated user changes.
+
+---
+
+## 2. Change-Preservation Rules
+
+Preserve the existing application and previous updates.
+
+1. Make the smallest coherent changes that achieve the requested design.
+2. Reuse current routes, data models, services, components, and dependencies wherever reasonable.
+3. Do not remove, rename, or change an existing field, route, API contract, workflow, calculation, or document identifier unless required and safe.
+4. Do not replace a working document generator with a new implementation merely to match the reference’s technology.
+5. Do not change tax, discount, currency, rounding, payment, invoice-numbering, or other financial business rules as a visual-only refactor.
+6. Do not remove existing document sections just to make a document fit on one page.
+7. Do not use placeholder business data in the production template.
+8. Do not introduce network dependencies for fonts, logos, images, or document generation unless the existing application explicitly requires them and provides a reliable fallback.
+9. Do not commit secrets, production customer information, or real financial documents in fixtures or reports.
+10. If the implementation requires a breaking change, data migration, architectural replacement, or a change that conflicts with an earlier approved feature, **stop before making that specific change**, explain why it is necessary, and request explicit permission. Continue independent, non-conflicting work.
+
+---
+
+## 3. Design Requirements from `INVOICE_TEMPLATE_DESIGN.md`
+
+Use the following as the target design system, adapting only where the actual renderer or a document’s semantics require it.
+
+### 3.1 Page geometry and print canvas
+
+For A4 invoice output, target the reference geometry:
+
+```css
+@page {
+  size: A4;
+  margin: 10mm 12mm;
+}
+```
+
+Keep all content inside the printable width after page margins and wrapper padding are accounted for. Avoid overflow beyond page edges.
+
+For browser preview, a white paper surface, subtle border, and small radius may be used. In actual print/PDF output, remove preview-only shadows, borders, outer padding, and decorative effects that waste the page budget.
+
+Do not force A4 on a template when the application has an established, justified page size for that document. Keep page size consistent for each document type and document the choice.
+
+### 3.2 Visual hierarchy and color
+
+Adopt the reference’s compact technical-business aesthetic:
+
+- Navy for main headings, table headers, and important totals.
+- Cyan for restrained accents and contextual callouts.
+- Slate tones for supporting metadata.
+- White as the page surface.
+- Light, print-safe separators and carefully controlled row tinting.
+
+The design should feel like a compact operational statement, not a marketing flyer. Use color and borders to convey hierarchy, not decoration. Maintain sufficient contrast for ordinary printers and monochrome copies.
+
+### 3.3 Typography
+
+Use the reference’s intended typographic roles where the repository can support them:
+
+- **Inter** for body text.
+- **Archivo** for headings and prominent values.
+- **JetBrains Mono** for labels, metadata, identifiers, and aligned financial values.
+
+Prefer existing approved, locally available fonts. For WeasyPrint, bundle or configure reliable local font assets where practical; do not depend on remote Google Fonts being reachable when the PDF is generated. If the existing stack cannot use these exact fonts, choose the closest existing compatible fonts and document the substitution.
+
+Keep financial values right-aligned. Use tabular or monospace numerals where appropriate. Improve compactness through structure, padding, and line-height before reducing font size. Do not make small print even smaller simply to squeeze content onto one page.
+
+### 3.4 Invoice header and logo
+
+For the invoice template, preserve the reference’s shared horizontal header:
+
+- Left side: company logo followed by the company name.
+- Right side: document title and key metadata such as invoice number, issue date, and payment terms.
+- Approximate proportions: brand area 55%, metadata area 42%, adjusted to fit the actual content width.
+- Keep the logo near the upper-left of the brand block, before the company name.
+- Preserve the logo’s aspect ratio. The reference uses approximately `height: 46px; width: auto`; adjust only when needed for the target renderer and readable output.
+- Keep a thin navy-to-cyan accent rule beneath the header.
+
+For WeasyPrint, preserve the relationship between the renderer’s `base_url` and relative asset paths. The reference resolves `logo/seia_logo_official.jpg` relative to `app/templates` through the PDF builder. Confirm the actual file path in the current repository rather than blindly assuming it exists.
+
+Do not rely on an HTML `onerror` JavaScript handler for PDF logo fallback when using WeasyPrint. Use server-side template/data logic to provide a text-only fallback when the image is absent. If per-company logos are already supported, honor the existing validated asset policy; do not insert arbitrary remote image URLs.
+
+### 3.5 Parties and transaction context
+
+For invoices, use a compact, lightly tinted, bordered panel with two columns:
+
+- `Issued By`
+- `Bill To`
+
+Use a clear hierarchy: party role, legal/trading name, address, then contact details. Render optional contact rows only when meaningful data exists. Avoid blank rows and empty bordered sections.
+
+Place the project or engagement title immediately before the line-item table in a compact callout with a cyan left edge and pale cyan/blue background. Do not duplicate the same project title elsewhere unless the additional occurrence serves a distinct business purpose.
+
+For other documents, adapt party labels to the correct roles (for example, quotation issuer/customer or receipt payer/payee); never label all document parties as invoice-specific roles.
+
+### 3.6 Line-item table
+
+For the invoice, follow the reference’s compact table intent:
+
+- Fixed table layout to prevent variable descriptions from reshaping columns.
+- Allocate most available width to descriptions (reference: roughly 80%) and the remainder to quantity/unit (reference: roughly 20%) **only if that matches the application's existing invoice data and accounting presentation**.
+- If the existing invoice contract already includes unit price, line total, discount, or tax columns, preserve the business-required information. Do not hide or remove financially important columns just to copy the reference’s two-column example.
+- Materials and labor may be grouped into compact section headers with slim subtotal rows when those categories exist in the data model.
+- Use compact padding, approximately `3.5px 8px`, readable text around the reference’s `9.5px` body size where the renderer and output resolution make it legible, and approximately `1.25` line-height as a starting point.
+- Use light row separators, restrained alternating row tint, and strong table-header contrast.
+- Keep individual rows together across page breaks where supported, but do not assume `page-break-inside: avoid` guarantees the whole table will remain on one page.
+- Long descriptions must wrap without clipping or changing the table’s intended width.
+
+For quotations, receipts, or statements, adapt the columns to the real document requirements rather than blindly using the invoice table structure.
+
+### 3.7 Totals and money display
+
+For the invoice, place the totals summary on the right, with a restrained maximum width around the reference’s `290px` when appropriate. The grand total must be the strongest financial anchor through a clear top rule, modestly larger type, and navy emphasis.
+
+Requirements:
+
+- Preserve the existing financial calculation source of truth; the template should format validated values, not recalculate accounting logic.
+- Route amounts through the existing currency-formatting function/filter (the reference uses `formatCurrency` registered in `app/services/pdf_builder.py`).
+- Keep thousands separators, decimal precision, negative values, and currency labels consistent with the application’s financial rules.
+- Do not rely on truthiness expressions such as `value or fallback` when `0` is a valid amount.
+- Display subtotal, tax, discount, fees, and grand total only according to the actual supported data contract and business rules.
+- Never display a total that disagrees with the validated model/calculation layer.
+
+### 3.8 Scope, terms, and footer
+
+Where supported by the document data, keep scope/warranty notes in a compact left column and payment/remittance terms in a right-side bordered block. Use conditional rendering so absent optional sections do not create empty boxes.
+
+Use a quiet footer separated by a thin rule. Include only existing, correct business contact/tagline information. Do not fabricate payment terms, guarantees, compliance claims, company information, or legally required language.
+
+Use page-break controls to keep semantically related groups together when possible, while avoiding large blank gaps or pushing an unnecessarily large block to a new page.
+
+---
+
+## 4. Apply the Design Consistently Across Current Templates
+
+Inventory all existing generated document types before deciding the patch scope. At minimum, identify whether the application currently generates invoices, quotations, payment receipts/acknowledgments, statements, and project reports.
+
+### Invoice
+
+Apply the reference design most faithfully to the invoice, while preserving all existing invoice fields and accounting semantics.
+
+### Quotation
+
+Reuse the shared visual language (brand/header, metadata alignment, party panel, project callout, typography, currency presentation, restrained separators, and footer) where the existing quotation template supports it.
+
+Preserve quotation-specific fields such as quotation number, issue/expiry dates, scope of work, options, exclusions, terms, acceptance/signature area, and itemized pricing where present. Do not label a quotation as an invoice or show invoice-only payment status.
+
+### Receipt / payment acknowledgment
+
+Reuse branding, typography, metadata, party hierarchy, and currency alignment. Preserve payment-specific information such as receipt/reference number, payment date, payment method, amount received, related invoice, balance after payment, and acknowledgment wording where those fields exist.
+
+Do not imply that a payment acknowledgment is a legally compliant tax document unless the application’s supported requirements have been confirmed.
+
+### Statement or project report
+
+Use shared tokens and header/footer conventions if appropriate, but prioritize each document’s specific information architecture. Do not force invoices’ financial table or party block into documents where it makes the content harder to understand.
+
+### Shared styles
+
+If multiple templates use the same styling, introduce or extend shared CSS tokens/components only when this reduces duplication without causing unrelated layout regressions. Keep document-specific styles scoped to avoid one template unintentionally changing another.
+
+---
+
+## 5. Resolve the Data Contract Watchouts
+
+The design analysis explicitly identifies contract risks. Investigate and resolve them only in a way supported by the current application’s actual requirements.
+
+### Tax and discount
+
+The reference says `DocumentPayload` defines `main_materials_total`, `labor_other_total`, `total`, and `notes`, but does not define `tax` or `discount`, while the invoice template checks `doc.tax` and `doc.discount`.
+
+- Inspect the actual current model/schema, template, and PDF generation path.
+- Decide whether tax and discount are supported business fields.
+- If required and already supported by the application's business rules, make the data contract explicit and validate them at the schema/service layer.
+- If not supported, render no tax/discount row rather than inventing values.
+- Ensure the template correctly distinguishes missing/`None` values from legitimate zero values.
+- Do not silently change accounting behavior to satisfy a template.
+
+### Company logo
+
+The reference says `CompanyInfo` has `logo_url`, while the template always uses a fixed SEIA image.
+
+- Inspect whether multiple company profiles or configurable logos are supported in the actual repository.
+- If configurable logos are in scope, implement them through a validated, renderer-safe local asset or controlled URL policy.
+- Avoid arbitrary remote resources, filesystem traversal, and untrusted URL fetching.
+- Provide a graceful text-only fallback when the logo is absent or cannot be resolved.
+- Retain the current fixed logo where the application intentionally supports only one company.
+
+### Optional numeric fields and missing data
+
+Review optional fields for truthiness bugs. A legitimate zero total, zero tax, zero discount, empty-but-meaningful identifier, or false boolean must not be accidentally hidden or replaced by a default. Use explicit null/undefined/missing checks based on the current stack.
+
+### Escaping and data validation
+
+- Escape user-controlled content according to the existing template engine.
+- Never mark arbitrary invoice/quotation data as trusted HTML.
+- Keep data validation and arithmetic in the model/schema/service/domain layer.
+- Keep templates responsible for semantic layout, formatting, and conditional display.
+- Validate that displayed totals reconcile with source totals, tax, discounts, and other supported charges.
+
+---
+
+## 6. PDF, Printing, and Pagination Reliability
+
+The generated PDF—not just the browser preview—is the deliverable that must pass review.
+
+For the actual document-generation path:
+
+1. Keep the renderer’s asset base path aligned with template-relative logo and font paths.
+2. Remove preview-only visual treatment in print/PDF output where appropriate.
+3. Ensure text remains selectable/searchable if the existing renderer supports that.
+4. Check for clipped text, overlapping columns, missing images/fonts, broken glyphs, and page overflow.
+5. Ensure headings and table headers remain meaningful across pages.
+6. Test long tables and multi-page documents.
+7. Use renderer-supported CSS rather than assuming browser-only features will work.
+8. Do not rely on JavaScript executing during WeasyPrint rendering.
+9. Avoid depending on internet access during production PDF generation.
+10. Preserve the application's existing PDF export, download, print, and sharing entry points.
+
+`page-break-inside: avoid` and `break-inside: avoid` are hints, not a complete pagination solution. Test actual generated PDFs with enough rows and long text to force page breaks.
+
+---
+
+## 7. Required Test Fixtures and Scenarios
+
+Create or update tests/fixtures using synthetic, non-sensitive data. Cover each affected document type.
+
+### Content and layout
+
+- Normal short invoice/quotation.
+- Long company and customer names.
+- Multi-line addresses and contact details.
+- Long project titles and descriptions.
+- Many materials/labor rows or equivalent document items.
+- Long notes, scope, warranty, and terms.
+- Missing optional contact details.
+- Missing logo and local-font fallback.
+- Zero subtotal/category totals.
+- Zero tax and zero discount when those fields are supported.
+- Missing tax/discount when not provided.
+- Negative/adjustment values if supported by current business rules.
+- Long tables spanning at least two pages.
+- Missing optional sections with no empty visual shells.
+
+### Financial correctness
+
+- Currency formatting and decimal precision.
+- Displayed subtotal and grand total matching the validated document data.
+- Tax/discount rows matching the supported data contract.
+- No hidden zero values due to truthiness checks.
+- No accidental currency label changes or recomputation in the template.
+
+### Rendering and assets
+
+- Actual PDF generation succeeds.
+- Logo loads from the intended path and maintains aspect ratio.
+- Fonts load locally or fall back acceptably offline.
+- No clipped text, overlapping totals, or unexpected blank pages.
+- Page size and margins are correct.
+- Browser preview styling does not leak undesirably into printed output.
+
+Do not report a rendering check as passed if only the HTML/CSS was inspected. Generate a real PDF with the project's available renderer and inspect its pages visually or using the available PDF QA tools.
+
+---
+
+## 8. Implementation Workflow
+
+Execute the following steps in order:
+
+### Phase A — Audit and baseline
+
+1. Read `INVOICE_TEMPLATE_DESIGN.md` completely.
+2. Inspect the repository and current working-tree changes.
+3. Inventory existing document templates and their generation entry points.
+4. Trace template data from schema/model through service to the rendered document.
+5. Capture current baseline outputs for the affected documents when feasible.
+6. Identify design gaps and data contract mismatches.
+7. Produce a brief implementation checklist based on verified findings.
+
+### Phase B — Implement
+
+1. Apply the invoice visual design to the current invoice template.
+2. Apply reusable visual elements to related current document templates where appropriate.
+3. Align optional fields and rendering conditions with the real data contract.
+4. Correct reliable asset/font loading for the existing renderer.
+5. Improve print/PDF pagination and long-content handling.
+6. Add or update fixtures and tests.
+7. Keep business rules and unrelated behavior unchanged.
+
+Do not stop after writing the checklist. Carry out the implementation unless a genuine conflict with prior work requires permission.
+
+### Phase C — Verify
+
+1. Run relevant lint, type-check, unit, integration, and build commands supported by the project.
+2. Generate actual PDFs for the affected document types.
+3. Inspect baseline versus updated PDFs for page geometry, typography, branding, totals, terms, pagination, and overflow.
+4. Verify edge cases from Section 7.
+5. Review the Git diff for accidental changes to business logic, data schema, unrelated screens, or generated files.
+6. Fix regressions caused by the patch and rerun the relevant checks.
+
+If dependencies or tooling are unavailable, do not claim that corresponding checks passed. Use the available environment where appropriate and document what remains unverified.
+
+---
+
+## 9. Acceptance Criteria
+
+The implementation is complete only when the applicable criteria below are verified:
+
+- [ ] `INVOICE_TEMPLATE_DESIGN.md` was read and mapped to the actual document-generation stack.
+- [ ] Existing document templates and generation entry points were inventoried.
+- [ ] The invoice has the intended compact technical-business visual hierarchy.
+- [ ] The invoice header places the brand/logo on the left and document metadata on the right, where compatible with the current template.
+- [ ] The logo preserves its aspect ratio and has a reliable fallback.
+- [ ] A4 page geometry and printable width are respected for invoice PDFs.
+- [ ] Related templates share appropriate design elements without losing their document-specific meaning.
+- [ ] Existing fields and financial semantics remain intact.
+- [ ] Tax/discount handling matches the actual data contract; unsupported fields are not invented.
+- [ ] Valid zero values render correctly.
+- [ ] Optional sections do not leave empty shells.
+- [ ] Amount formatting and totals remain consistent with validated business data.
+- [ ] Assets render deterministically without an unnecessary online dependency.
+- [ ] Long content and multi-page tables render without clipping or overlap.
+- [ ] Actual generated PDFs have been inspected.
+- [ ] Relevant tests, lint/type checks, and build commands were run and results recorded.
+- [ ] No unrelated or previously working functionality was removed.
+- [ ] Remaining limitations are documented accurately.
+
+Do not mark a criterion complete without evidence.
+
+---
+
+## 10. Required Deliverables
+
+Modify the existing template and style files directly as appropriate. Do not create a duplicate template system unless there is a concrete, documented need.
+
+Update or add documentation only where it helps maintain the new design system or clarifies the data contract.
+
+At the end, provide a concise implementation report containing:
+
+1. **Summary:** What changed and which document types were updated.
+2. **Repository findings:** Actual template paths, renderer, data models, and PDF generation path discovered.
+3. **Design mapping:** Which parts of `INVOICE_TEMPLATE_DESIGN.md` were applied directly and which were adapted for the existing stack.
+4. **Data-contract changes:** Any model/schema changes and why they were required.
+5. **Files changed:** Important modified/added files and the purpose of each.
+6. **Verification:** Actual commands, tests, builds, and PDF scenarios run, with pass/fail results.
+7. **Visual QA:** Results of inspecting actual PDF outputs, including pagination and edge cases.
+8. **Remaining issues:** Anything not implemented or not verified, with the reason.
+9. **Risks:** Any compatibility, data, or migration risk introduced by the patch.
+
+## Final Directive
+
+Treat `INVOICE_TEMPLATE_DESIGN.md` as the visual and technical reference, but treat the current repository as the source of truth for the implementation stack, document fields, and business rules.
+
+**Modify the existing document templates to adopt the design intentionally, preserve business correctness, and verify the actual generated PDFs. Do not stop at analysis, and do not claim success without test and rendering evidence.**

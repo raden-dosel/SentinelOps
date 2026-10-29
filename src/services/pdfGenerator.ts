@@ -27,9 +27,10 @@ export async function generateQuotationPdf(
   const left = 40;
   const right = width - 40;
   const primary = rgb(0.06, 0.09, 0.16);
-  const accent = rgb(0.15, 0.39, 0.92);
+  const cyan = rgb(0.05, 0.65, 0.82);
+  const accent = cyan;
   const text = rgb(0.2, 0.25, 0.33);
-  const pale = rgb(0.94, 0.96, 0.98);
+  const pale = rgb(0.96, 0.97, 0.99);
   const border = rgb(0.85, 0.88, 0.92);
   const white = rgb(1, 1, 1);
 
@@ -51,13 +52,18 @@ export async function generateQuotationPdf(
     return lines;
   };
 
+  let pageIndex = 1;
   let page = pdfDoc.addPage([width, height]);
   let y = height - 50;
-  const drawHeader = () => {
+  const drawHeader = (isContinuation = false) => {
     page.drawRectangle({ x: left, y: y - 55, width: right - left, height: 65, color: primary });
+    page.drawRectangle({ x: left, y: y - 57, width: right - left, height: 2, color: cyan });
     page.drawText(settings.businessName.toUpperCase(), { x: 55, y: y - 20, size: 13, font: bold, color: white });
     page.drawText(settings.tagline, { x: 55, y: y - 36, size: 8, font: regular, color: rgb(0.8, 0.85, 0.9) });
-    page.drawText(quotation.revisionNumber > 0 ? `QUOTATION (REV ${quotation.revisionNumber})` : 'FORMAL QUOTATION', {
+    const docTitle = quotation.revisionNumber > 0
+      ? `QUOTATION (REV ${quotation.revisionNumber})${isContinuation ? ` - P.${pageIndex}` : ''}`
+      : `FORMAL QUOTATION${isContinuation ? ` - P.${pageIndex}` : ''}`;
+    page.drawText(docTitle, {
       x: width - 230, y: y - 25, size: 12, font: bold, color: rgb(0.98, 0.75, 0.18),
     });
     page.drawText(`Ref: ${quotation.quotationNumber}`, { x: width - 230, y: y - 42, size: 10, font: bold, color: white });
@@ -70,9 +76,10 @@ export async function generateQuotationPdf(
     y -= 22;
   };
   const newContentPage = () => {
+    pageIndex += 1;
     page = pdfDoc.addPage([width, height]);
     y = height - 50;
-    drawHeader();
+    drawHeader(true);
     drawTableHeader();
   };
   const drawWrapped = (value: string, x: number, maxWidth: number, size: number, color = text, font = regular, gap = 10) => {
@@ -85,8 +92,8 @@ export async function generateQuotationPdf(
     return lines.length;
   };
 
-  drawHeader();
-  page.drawText('FROM:', { x: left, y, size: 8, font: bold, color: accent });
+  drawHeader(false);
+  page.drawText('FROM:', { x: left, y, size: 8, font: bold, color: cyan });
   drawWrapped(settings.businessName, left, 245, 9, primary, bold, 11);
   drawWrapped(settings.address, left, 245, 8, text, regular, 10);
   drawWrapped(`${settings.city}, ${settings.region}`, left, 245, 8, text, regular, 10);
@@ -94,7 +101,7 @@ export async function generateQuotationPdf(
   if (settings.tinNumber) drawWrapped(`TIN: ${settings.tinNumber}`, left, 245, 8, text, regular, 10);
 
   let clientY = height - 130;
-  page.drawText('PREPARED FOR:', { x: 330, y: clientY, size: 8, font: bold, color: accent });
+  page.drawText('PREPARED FOR:', { x: 330, y: clientY, size: 8, font: bold, color: cyan });
   const drawClientLine = (value: string, size: number, clientFont = regular) => {
     page.drawText(value, { x: 330, y: clientY - 12, size, font: clientFont, color: clientFont === bold ? primary : text });
     clientY -= 11;
@@ -106,7 +113,8 @@ export async function generateQuotationPdf(
   y = Math.min(y, clientY) - 18;
 
   page.drawRectangle({ x: left, y: y - 24, width: right - left, height: 28, color: pale, borderColor: border, borderWidth: 1 });
-  page.drawText(`PROJECT / SERVICE: ${quotation.projectTitle.toUpperCase()}`, { x: 50, y: y - 16, size: 9, font: bold, color: primary });
+  page.drawRectangle({ x: left, y: y - 24, width: 3.5, height: 28, color: cyan });
+  page.drawText(`PROJECT / SERVICE: ${quotation.projectTitle.toUpperCase()}`, { x: 52, y: y - 16, size: 9, font: bold, color: primary });
   y -= 40;
   page.drawText('SCOPE OF WORK:', { x: left, y, size: 8, font: bold, color: primary });
   y -= 12;
@@ -446,236 +454,299 @@ export async function generateQuotationPdfLegacy(
 }
 
 /**
- * Generates a Billing Invoice PDF document
+ * Generates an itemized, paginated Billing Invoice PDF document
+ * adhering to the compact technical-business design system in INVOICE_TEMPLATE_DESIGN.md.
  */
 export async function generateInvoicePdf(
   invoice: Invoice,
   settings: AppSettings
 ): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
-  const page = pdfDoc.addPage([595.28, 841.89]);
-  const { width, height } = page.getSize();
+  const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const width = 595.28;
+  const height = 841.89;
+  const left = 40;
+  const right = width - 40;
 
-  const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  // Design Tokens from INVOICE_TEMPLATE_DESIGN.md
+  const primary = rgb(0.06, 0.09, 0.16); // Navy (#0f172a)
+  const cyan = rgb(0.05, 0.65, 0.82);    // Restrained Cyan accent (#0891b2 / #06b6d4)
+  const text = rgb(0.2, 0.25, 0.33);      // Slate text
+  const pale = rgb(0.96, 0.97, 0.99);    // Pale tint
+  const border = rgb(0.85, 0.88, 0.92);  // Light border
+  const white = rgb(1, 1, 1);
+  const amber = rgb(0.98, 0.75, 0.18);
+  const success = rgb(0.1, 0.6, 0.2);
+  const danger = rgb(0.7, 0.1, 0.1);
 
-  const primaryColor = rgb(0.06, 0.09, 0.16);
-  const accentColor = rgb(0.15, 0.39, 0.92);
-  const textColor = rgb(0.2, 0.25, 0.33);
-  const lightGrey = rgb(0.94, 0.96, 0.98);
-  const borderGrey = rgb(0.85, 0.88, 0.92);
+  const wrap = (value: string, maxWidth: number, size: number): string[] => {
+    const words = value.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return [''];
+    const lines: string[] = [];
+    let line = '';
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (regular.widthOfTextAtSize(candidate, size) <= maxWidth || !line) {
+        line = candidate;
+      } else {
+        lines.push(line);
+        line = word;
+      }
+    }
+    if (line) lines.push(line);
+    return lines;
+  };
 
+  let pageIndex = 1;
+  let page = pdfDoc.addPage([width, height]);
   let y = height - 50;
 
-  // Header Banner
-  page.drawRectangle({
-    x: 40,
-    y: y - 55,
-    width: width - 80,
-    height: 65,
-    color: primaryColor,
-  });
+  const drawHeader = (isContinuation = false) => {
+    page.drawRectangle({ x: left, y: y - 55, width: right - left, height: 65, color: primary });
+    // Thin Cyan accent rule beneath header banner
+    page.drawRectangle({ x: left, y: y - 57, width: right - left, height: 2, color: cyan });
 
-  page.drawText(settings.businessName.toUpperCase(), {
-    x: 55,
-    y: y - 20,
-    size: 13,
-    font: fontBold,
-    color: rgb(1, 1, 1),
-  });
+    page.drawText(settings.businessName.toUpperCase(), {
+      x: 55,
+      y: y - 20,
+      size: 13,
+      font: bold,
+      color: white,
+    });
+    page.drawText(settings.tagline, {
+      x: 55,
+      y: y - 36,
+      size: 8,
+      font: regular,
+      color: rgb(0.8, 0.85, 0.9),
+    });
 
-  page.drawText(settings.tagline, {
-    x: 55,
-    y: y - 36,
-    size: 8,
-    font: fontRegular,
-    color: rgb(0.8, 0.85, 0.9),
-  });
+    const docTitle = isContinuation
+      ? `BILLING INVOICE (Page ${pageIndex})`
+      : 'BILLING INVOICE';
+    page.drawText(docTitle, {
+      x: width - 230,
+      y: y - 25,
+      size: 12,
+      font: bold,
+      color: amber,
+    });
+    page.drawText(`No: ${invoice.invoiceNumber}`, {
+      x: width - 230,
+      y: y - 42,
+      size: 10,
+      font: bold,
+      color: white,
+    });
+    y -= 80;
+  };
 
-  // Invoice Title
-  page.drawText('BILLING INVOICE', {
-    x: width - 210,
-    y: y - 25,
-    size: 12,
-    font: fontBold,
-    color: rgb(0.98, 0.75, 0.18),
-  });
+  const drawTableHeader = () => {
+    page.drawRectangle({ x: left, y: y - 18, width: right - left, height: 22, color: primary });
+    const labels: [string, number][] = [
+      ['NO.', 48],
+      ['ITEM DESCRIPTION / SCOPE', 75],
+      ['QTY & UNIT', 360],
+      ['UNIT PRICE (PHP)', 430],
+      ['AMOUNT (PHP)', 510],
+    ];
+    labels.forEach(([label, xPos]) => {
+      page.drawText(label, { x: xPos, y: y - 12, size: 8, font: bold, color: white });
+    });
+    y -= 22;
+  };
 
-  page.drawText(`No: ${invoice.invoiceNumber}`, {
-    x: width - 210,
-    y: y - 42,
-    size: 10,
-    font: fontBold,
-    color: rgb(1, 1, 1),
-  });
+  const newContentPage = () => {
+    pageIndex += 1;
+    page = pdfDoc.addPage([width, height]);
+    y = height - 50;
+    drawHeader(true);
+    drawTableHeader();
+  };
 
-  y -= 80;
+  const drawWrapped = (
+    value: string,
+    x: number,
+    maxWidth: number,
+    size: number,
+    color = text,
+    font = regular,
+    gap = 10
+  ) => {
+    const lines = wrap(value, maxWidth, size);
+    lines.forEach((line) => {
+      if (y < 85) newContentPage();
+      page.drawText(line, { x, y, size, font, color });
+      y -= gap;
+    });
+    return lines.length;
+  };
 
-  // Info Section
-  page.drawText('BILLED FROM:', { x: 40, y, size: 8, font: fontBold, color: accentColor });
-  page.drawText(settings.businessName, { x: 40, y: y - 12, size: 9, font: fontBold, color: primaryColor });
-  page.drawText(settings.address, { x: 40, y: y - 24, size: 8, font: fontRegular, color: textColor });
-  page.drawText(`${settings.city}, ${settings.region}`, { x: 40, y: y - 35, size: 8, font: fontRegular, color: textColor });
-  page.drawText(`Tel: ${settings.contactNumber} | Email: ${settings.email}`, { x: 40, y: y - 46, size: 8, font: fontRegular, color: textColor });
-  if (settings.tinNumber) {
-    page.drawText(`TIN: ${settings.tinNumber}`, { x: 40, y: y - 57, size: 8, font: fontRegular, color: textColor });
-  }
+  // 1. Draw Top Header Banner
+  drawHeader(false);
 
-  const colRightX = 330;
-  page.drawText('BILLED TO:', { x: colRightX, y, size: 8, font: fontBold, color: accentColor });
-  page.drawText(invoice.clientName, { x: colRightX, y: y - 12, size: 9, font: fontBold, color: primaryColor });
-  page.drawText(invoice.clientAddress || 'Client Site Address', { x: colRightX, y: y - 24, size: 8, font: fontRegular, color: textColor });
-  page.drawText(`Contact: ${invoice.clientContact || 'N/A'}`, { x: colRightX, y: y - 35, size: 8, font: fontRegular, color: textColor });
-  page.drawText(`Date Issued: ${invoice.issueDate}   |   Due Date: ${invoice.dueDate}`, {
-    x: colRightX,
-    y: y - 46,
-    size: 8,
-    font: fontBold,
-    color: primaryColor,
-  });
+  // 2. Parties and Transaction Context (Two-Column Party Panel)
+  page.drawText('BILLED FROM:', { x: left, y, size: 8, font: bold, color: cyan });
+  drawWrapped(settings.businessName, left, 245, 9, primary, bold, 11);
+  drawWrapped(settings.address, left, 245, 8, text, regular, 10);
+  drawWrapped(`${settings.city}, ${settings.region}`, left, 245, 8, text, regular, 10);
+  drawWrapped(`Tel: ${settings.contactNumber} | Email: ${settings.email}`, left, 245, 8, text, regular, 10);
+  if (settings.tinNumber) drawWrapped(`TIN: ${settings.tinNumber}`, left, 245, 8, text, regular, 10);
+
+  let clientY = height - 130;
+  page.drawText('BILLED TO:', { x: 330, y: clientY, size: 8, font: bold, color: cyan });
+  const drawClientLine = (value: string, size: number, clientFont = regular, customColor = text) => {
+    page.drawText(value, { x: 330, y: clientY - 12, size, font: clientFont, color: customColor });
+    clientY -= 11;
+  };
+  drawClientLine(invoice.clientName, 9, bold, primary);
+  drawClientLine(invoice.clientAddress || 'Client Site Address', 8);
+  drawClientLine(`Contact: ${invoice.clientContact || 'N/A'}`, 8);
+  drawClientLine(`Date Issued: ${invoice.issueDate}  |  Due Date: ${invoice.dueDate}`, 8, bold, primary);
   if (invoice.quotationNumber) {
-    page.drawText(`Quotation Ref: ${invoice.quotationNumber}`, { x: colRightX, y: y - 57, size: 8, font: fontRegular, color: textColor });
+    drawClientLine(`Quotation Ref: ${invoice.quotationNumber}`, 8);
   }
+  y = Math.min(y, clientY) - 18;
 
-  y -= 75;
-
-  // Title Box
+  // 3. Subject / Billing For Callout Box with Cyan Left Edge Accent
   page.drawRectangle({
-    x: 40,
+    x: left,
     y: y - 24,
-    width: width - 80,
+    width: right - left,
     height: 28,
-    color: lightGrey,
-    borderColor: borderGrey,
+    color: pale,
+    borderColor: border,
     borderWidth: 1,
+  });
+  // Restrained cyan left edge
+  page.drawRectangle({
+    x: left,
+    y: y - 24,
+    width: 3.5,
+    height: 28,
+    color: cyan,
   });
 
   page.drawText(`SUBJECT / BILLING FOR: ${invoice.title.toUpperCase()}`, {
-    x: 50,
+    x: 52,
     y: y - 16,
     size: 9,
-    font: fontBold,
-    color: primaryColor,
+    font: bold,
+    color: primary,
   });
 
-  const statusLabel = `Status: ${invoice.status.toUpperCase()}`;
-  page.drawText(statusLabel, {
+  const statusColor = invoice.status === 'Paid' ? success : invoice.status === 'Overdue' ? danger : cyan;
+  page.drawText(`Status: ${invoice.status.toUpperCase()}`, {
     x: width - 180,
     y: y - 16,
     size: 8,
-    font: fontBold,
-    color: invoice.status === 'Paid' ? rgb(0.1, 0.6, 0.2) : accentColor,
+    font: bold,
+    color: statusColor,
   });
 
-  y -= 40;
+  y -= 38;
 
-  // Table Header
-  const tableHeaderY = y;
-  page.drawRectangle({
-    x: 40,
-    y: tableHeaderY - 18,
-    width: width - 80,
-    height: 22,
-    color: primaryColor,
-  });
-
-  page.drawText('NO.', { x: 48, y: tableHeaderY - 12, size: 8, font: fontBold, color: rgb(1, 1, 1) });
-  page.drawText('ITEM DESCRIPTION / SCOPE', { x: 80, y: tableHeaderY - 12, size: 8, font: fontBold, color: rgb(1, 1, 1) });
-  page.drawText('QTY & UNIT', { x: 380, y: tableHeaderY - 12, size: 8, font: fontBold, color: rgb(1, 1, 1) });
-  page.drawText('UNIT PRICE (PHP)', { x: 440, y: tableHeaderY - 12, size: 8, font: fontBold, color: rgb(1, 1, 1) });
-  page.drawText('AMOUNT (PHP)', { x: 515, y: tableHeaderY - 12, size: 8, font: fontBold, color: rgb(1, 1, 1) });
-
-  y -= 22;
+  // 4. Line Items Table
+  drawTableHeader();
 
   invoice.lineItems.forEach((item, index) => {
-    const isEven = index % 2 === 0;
-    const rowHeight = 20;
+    const descriptionLines = wrap(item.description, 270, 7.5);
+    const rowHeight = Math.max(20, descriptionLines.length * 10 + 6);
+    if (y - rowHeight < 110) newContentPage();
 
-    if (isEven) {
+    if (index % 2 === 0) {
       page.drawRectangle({
-        x: 40,
+        x: left,
         y: y - rowHeight,
-        width: width - 80,
+        width: right - left,
         height: rowHeight,
-        color: lightGrey,
+        color: pale,
       });
     }
 
-    page.drawText(`${index + 1}`, { x: 50, y: y - 13, size: 8, font: fontRegular, color: textColor });
-    page.drawText(item.description.length > 55 ? item.description.substring(0, 52) + '...' : item.description, {
-      x: 80,
-      y: y - 13,
-      size: 7.5,
-      font: fontRegular,
-      color: primaryColor,
+    page.drawText(`${index + 1}`, { x: 50, y: y - 13, size: 8, font: regular, color: text });
+    descriptionLines.forEach((line, lineIndex) => {
+      page.drawText(line, {
+        x: 75,
+        y: y - 11 - lineIndex * 10,
+        size: 7.5,
+        font: regular,
+        color: primary,
+      });
     });
-    page.drawText(`${item.quantity} ${item.unit}`, { x: 380, y: y - 13, size: 7.5, font: fontRegular, color: textColor });
+    page.drawText(`${item.quantity} ${item.unit}`, { x: 360, y: y - 13, size: 7.5, font: regular, color: text });
     page.drawText(fromCentavos(item.unitPriceCentavos).toFixed(2), {
-      x: 440,
+      x: 430,
       y: y - 13,
       size: 7.5,
-      font: fontRegular,
-      color: textColor,
+      font: regular,
+      color: text,
     });
     page.drawText(fromCentavos(item.totalCentavos).toFixed(2), {
-      x: 515,
+      x: 510,
       y: y - 13,
       size: 7.5,
-      font: fontBold,
-      color: primaryColor,
+      font: bold,
+      color: primary,
     });
 
     y -= rowHeight;
   });
 
-  page.drawLine({ start: { x: 40, y }, end: { x: width - 40, y }, thickness: 1, color: borderGrey });
-  y -= 10;
+  // Table bottom border
+  page.drawLine({
+    start: { x: left, y },
+    end: { x: right, y },
+    thickness: 1,
+    color: border,
+  });
+  y -= 12;
 
-  // Payment Breakdown
+  // If totals block won't fit, start a new page
+  if (y < 210) newContentPage();
+
+  // 5. Totals Area (Structured Financial Hierarchy)
   const totalsX = 360;
-  page.drawText('Subtotal:', { x: totalsX, y, size: 9, font: fontRegular, color: textColor });
-  page.drawText(formatPhp(invoice.subtotalCentavos), { x: 480, y, size: 9, font: fontRegular, color: textColor });
-  y -= 15;
+  const drawTotalRow = (label: string, value: string, font = regular, color = text, size = 8.5) => {
+    page.drawText(label, { x: totalsX, y, size, font, color });
+    page.drawText(value, { x: 470, y, size, font, color });
+    y -= 14;
+  };
+
+  drawTotalRow('Subtotal:', formatPhp(invoice.subtotalCentavos));
 
   if (invoice.taxMode !== 'NON_VAT') {
     const taxLabel = invoice.taxMode === 'INCLUSIVE'
       ? `VAT (${invoice.taxRatePercent}% Incl.):`
       : `VAT (${invoice.taxRatePercent}%):`;
-    page.drawText(taxLabel, { x: totalsX, y, size: 9, font: fontRegular, color: textColor });
-    page.drawText(formatPhp(invoice.taxCentavos), { x: 480, y, size: 9, font: fontRegular, color: textColor });
-    y -= 15;
+    drawTotalRow(taxLabel, formatPhp(invoice.taxCentavos));
   }
 
-  page.drawText('Grand Total Billed:', { x: totalsX, y, size: 9, font: fontBold, color: primaryColor });
-  page.drawText(formatPhp(invoice.grandTotalCentavos), { x: 480, y, size: 9, font: fontBold, color: primaryColor });
-  y -= 15;
+  drawTotalRow('Grand Total Billed:', formatPhp(invoice.grandTotalCentavos), bold, primary, 9);
+  drawTotalRow('Total Paid to Date:', formatPhp(invoice.paidAmountCentavos), regular, success, 8.5);
 
-  page.drawText('Total Paid to Date:', { x: totalsX, y, size: 9, font: fontRegular, color: rgb(0.1, 0.6, 0.2) });
-  page.drawText(formatPhp(invoice.paidAmountCentavos), { x: 480, y, size: 9, font: fontRegular, color: rgb(0.1, 0.6, 0.2) });
-  y -= 18;
-
-  // Remaining Balance Banner
+  // Balance Due Banner
+  const isSettled = invoice.remainingBalanceCentavos <= 0;
   page.drawRectangle({
     x: totalsX - 10,
     y: y - 8,
-    width: width - totalsX - 30,
+    width: right - totalsX + 10,
     height: 24,
-    color: invoice.remainingBalanceCentavos > 0 ? rgb(0.7, 0.1, 0.1) : rgb(0.1, 0.5, 0.2),
+    color: isSettled ? success : danger,
   });
-
-  page.drawText('BALANCE DUE:', { x: totalsX, y, size: 9, font: fontBold, color: rgb(1, 1, 1) });
+  page.drawText('BALANCE DUE:', { x: totalsX, y, size: 9, font: bold, color: white });
   page.drawText(formatPhp(invoice.remainingBalanceCentavos), {
-    x: 480,
+    x: 470,
     y,
     size: 9.5,
-    font: fontBold,
-    color: rgb(1, 1, 1),
+    font: bold,
+    color: white,
   });
+  y -= 36;
 
-  y -= 35;
-
-  // Payment Instructions
-  page.drawText('PAYMENT INSTRUCTIONS & BANK DETAILS:', { x: 40, y, size: 8, font: fontBold, color: primaryColor });
+  // 6. Payment Instructions & Remittance Terms
+  page.drawText('PAYMENT INSTRUCTIONS & BANK DETAILS:', { x: left, y, size: 8, font: bold, color: primary });
   y -= 12;
 
   const instructions = [
@@ -685,23 +756,39 @@ export async function generateInvoicePdf(
   ];
 
   for (const line of instructions) {
-    page.drawText(`• ${line}`, { x: 40, y, size: 7, font: fontRegular, color: textColor });
+    if (y < 85) newContentPage();
+    page.drawText(`• ${line}`, { x: left, y, size: 7, font: regular, color: text });
     y -= 10;
   }
 
-  // Footer Disclaimer
+  // 7. Signature Line
+  page.drawLine({
+    start: { x: left, y: 55 },
+    end: { x: 200, y: 55 },
+    thickness: 1,
+    color: border,
+  });
+  page.drawText('Authorized Representative Signature / Date', {
+    x: left,
+    y: 43,
+    size: 7.5,
+    font: regular,
+    color: text,
+  });
+
+  // 8. Quiet Footer / BIR Compliance Notice
   page.drawText(
     'This billing document is an internal commercial invoice issued by SentinelOps. Not an authorized BIR tax invoice.',
     {
-      x: 40,
-      y: 30,
+      x: left,
+      y: 26,
       size: 6.5,
-      font: fontRegular,
+      font: regular,
       color: rgb(0.5, 0.55, 0.6),
     }
   );
 
-  return await pdfDoc.save();
+  return pdfDoc.save();
 }
 
 /**
@@ -721,9 +808,9 @@ export async function generatePaymentReceiptPdf(
   const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
   const primaryColor = rgb(0.06, 0.09, 0.16);
-  const accentColor = rgb(0.15, 0.39, 0.92);
+  const cyanColor = rgb(0.05, 0.65, 0.82);
   const textColor = rgb(0.2, 0.25, 0.33);
-  const lightGrey = rgb(0.94, 0.96, 0.98);
+  const lightGrey = rgb(0.96, 0.97, 0.99);
   const borderGrey = rgb(0.85, 0.88, 0.92);
 
   let y = height - 40;
@@ -735,6 +822,14 @@ export async function generatePaymentReceiptPdf(
     width: width - 70,
     height: 50,
     color: primaryColor,
+  });
+  // Thin Cyan accent rule beneath header banner
+  page.drawRectangle({
+    x: 35,
+    y: y - 47,
+    width: width - 70,
+    height: 2,
+    color: cyanColor,
   });
 
   page.drawText(settings.businessName.toUpperCase(), {
@@ -771,7 +866,7 @@ export async function generatePaymentReceiptPdf(
 
   y -= 65;
 
-  // Received From & Reference Details
+  // Received From & Reference Details Panel with Cyan Left Accent
   page.drawRectangle({
     x: 35,
     y: y - 65,
@@ -781,28 +876,36 @@ export async function generatePaymentReceiptPdf(
     borderColor: borderGrey,
     borderWidth: 1,
   });
+  // Restrained cyan left edge
+  page.drawRectangle({
+    x: 35,
+    y: y - 65,
+    width: 3.5,
+    height: 70,
+    color: cyanColor,
+  });
 
-  page.drawText(`RECEIVED FROM:`, { x: 45, y: y - 15, size: 8, font: fontBold, color: primaryColor });
-  page.drawText(payment.clientName.toUpperCase(), { x: 135, y: y - 15, size: 8.5, font: fontBold, color: accentColor });
+  page.drawText(`RECEIVED FROM:`, { x: 48, y: y - 15, size: 8, font: fontBold, color: primaryColor });
+  page.drawText(payment.clientName.toUpperCase(), { x: 138, y: y - 15, size: 8.5, font: fontBold, color: cyanColor });
 
-  page.drawText(`INVOICE REFERENCE:`, { x: 45, y: y - 30, size: 8, font: fontBold, color: primaryColor });
-  page.drawText(`${payment.invoiceNumber} - ${invoice.title}`, { x: 155, y: y - 30, size: 8, font: fontRegular, color: textColor });
+  page.drawText(`INVOICE REFERENCE:`, { x: 48, y: y - 30, size: 8, font: fontBold, color: primaryColor });
+  page.drawText(`${payment.invoiceNumber} - ${invoice.title}`, { x: 158, y: y - 30, size: 8, font: fontRegular, color: textColor });
 
-  page.drawText(`PAYMENT METHOD:`, { x: 45, y: y - 45, size: 8, font: fontBold, color: primaryColor });
-  page.drawText(payment.paymentMethod, { x: 145, y: y - 45, size: 8, font: fontRegular, color: textColor });
+  page.drawText(`PAYMENT METHOD:`, { x: 48, y: y - 45, size: 8, font: fontBold, color: primaryColor });
+  page.drawText(payment.paymentMethod, { x: 148, y: y - 45, size: 8, font: fontRegular, color: textColor });
 
   page.drawText(`TRANSACTION REF / CHECK #:`, { x: 330, y: y - 45, size: 8, font: fontBold, color: primaryColor });
   page.drawText(payment.referenceNumber || 'N/A (Cash)', { x: 475, y: y - 45, size: 8, font: fontRegular, color: textColor });
 
-  page.drawText(`RECEIVED BY:`, { x: 45, y: y - 58, size: 8, font: fontBold, color: primaryColor });
-  page.drawText(payment.receivedBy || 'Authorized Officer', { x: 135, y: y - 58, size: 8, font: fontRegular, color: textColor });
+  page.drawText(`RECEIVED BY:`, { x: 48, y: y - 58, size: 8, font: fontBold, color: primaryColor });
+  page.drawText(payment.receivedBy || 'Authorized Officer', { x: 138, y: y - 58, size: 8, font: fontRegular, color: textColor });
 
   y -= 80;
 
   // Amount in words box
   page.drawText('THE SUM OF:', { x: 45, y, size: 8, font: fontBold, color: primaryColor });
   const words = amountInWords(payment.amountCentavos);
-  page.drawText(words, { x: 115, y, size: 8, font: fontBold, color: accentColor });
+  page.drawText(words, { x: 115, y, size: 8, font: fontBold, color: cyanColor });
 
   y -= 25;
 
@@ -849,7 +952,7 @@ export async function generatePaymentReceiptPdf(
     }
   );
 
-  return await pdfDoc.save();
+  return pdfDoc.save();
 }
 
 /**

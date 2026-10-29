@@ -413,6 +413,23 @@ export const BillingView: React.FC<BillingViewProps> = ({ initialInvoiceId }) =>
     }
   };
 
+  const handleShareInvoicePdf = async (inv: Invoice) => {
+    try {
+      const settings = await settingsRepository.getSettings();
+      const pdfBytes = await generateInvoicePdf(inv, settings);
+      const shared = await sharePdfBlob(
+        pdfBytes,
+        `${inv.invoiceNumber}_Invoice.pdf`,
+        `Billing Invoice ${inv.invoiceNumber}`,
+        `${inv.invoiceNumber} for ${inv.clientName}\n${inv.title}\nTotal: ${formatCurrency(inv.grandTotalCentavos)}\nBalance Due: ${formatCurrency(inv.remainingBalanceCentavos)}`
+      );
+      if (shared) showToast('Invoice PDF is ready to share or download; summary was copied when supported', 'success');
+      else showToast('Sharing cancelled. No message was sent.', 'info');
+    } catch {
+      showToast('Share failed', 'error');
+    }
+  };
+
   const handleDownloadReceiptPdf = async (payment: Payment) => {
     try {
       const inv = await invoiceRepository.getById(payment.invoiceId);
@@ -600,8 +617,16 @@ export const BillingView: React.FC<BillingViewProps> = ({ initialInvoiceId }) =>
                     <button
                       onClick={() => handlePrintInvoicePdf(inv)}
                       className="p-1.5 rounded-xl border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700"
+                      title="Print Invoice"
                     >
                       <Printer className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleShareInvoicePdf(inv)}
+                      className="p-1.5 rounded-xl border border-slate-700 bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700"
+                      title="Share Invoice"
+                    >
+                      <Share2 className="w-3.5 h-3.5" />
                     </button>
                     <button
                       onClick={() => handleInspectInvoice(inv)}
