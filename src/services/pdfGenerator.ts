@@ -3,13 +3,76 @@
  * Powered entirely offline by 'pdf-lib'.
  */
 
-import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFFont, PDFPage, RGB, rgb, StandardFonts } from 'pdf-lib';
 import { Quotation, Invoice, Payment, AppSettings } from '../types';
 import { formatCurrency, fromCentavos, amountInWords } from '../domain/calculations';
+
+
+/** Minimal font contract so layout helpers work with any pdf-lib embedded font. */
+type Measurable = { widthOfTextAtSize: (text: string, size: number) => number };
+
+/** Truncates with an ellipsis only as a last resort for single-line, fixed-width zones. */
+function fitLine(font: Measurable, value: string, size: number, maxWidth: number): string {
+  if (font.widthOfTextAtSize(value, size) <= maxWidth) return value;
+  let out = value;
+  while (out.length > 1 && font.widthOfTextAtSize(`${out}...`, size) > maxWidth) out = out.slice(0, -1);
+  return `${out.trimEnd()}...`;
+}
+
+/** Shrinks font size (down to minSize) until the text fits, then truncates if still too wide. */
+function shrinkToFit(font: Measurable, value: string, startSize: number, minSize: number, maxWidth: number): { text: string; size: number } {
+  let size = startSize;
+  while (size > minSize && font.widthOfTextAtSize(value, size) > maxWidth) size -= 0.5;
+  return { text: fitLine(font, value, size, maxWidth), size };
+}
 
 // Helpers to format currency and clean strings
 function formatPhp(centavos: number): string {
   return formatCurrency(centavos, true).replace(/₱/g, 'PHP ');
+}
+
+
+/**
+ * Draws the subject/project callout. The subject wraps inside its own column; the
+ * badge (status or category) lives in a separate right-hand column with a real gap.
+ * Returns the callout height so the caller can advance the cursor.
+ */
+function drawSubjectCallout(opts: {
+  page: PDFPage; left: number; right: number; top: number;
+  label: string; subject: string; badge: string;
+  regular: PDFFont; bold: PDFFont;
+  colors: { primary: RGB; cyan: RGB; pale: RGB; border: RGB; badgeFill: RGB; badgeStroke: RGB; badgeText: RGB };
+}): number {
+  const { page, left, right, top, label, subject, badge, regular, bold, colors } = opts;
+  const pad = 10;
+  const gap = 12;
+  const badgeText = fitLine(bold, badge, 7.5, 150);
+  const badgeW = bold.widthOfTextAtSize(badgeText, 7.5) + 16;
+  const badgeX = right - pad - badgeW;
+  const textRight = badgeX - gap;
+
+  // Label sits on its own line above the subject so the two never share a baseline.
+  const textW = textRight - (left + pad);
+  const words = subject.toUpperCase().trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (!line || bold.widthOfTextAtSize(candidate, 8) <= textW) line = candidate;
+    else { lines.push(line); line = word; }
+  }
+  if (line) lines.push(line);
+  const safeLines = (lines.length ? lines : ['-']).map((l) => fitLine(bold, l, 8, textW));
+
+  const height = 12 + 11 + safeLines.length * 10 + 6;
+  page.drawRectangle({ x: left, y: top - height, width: right - left, height, color: colors.pale, borderColor: colors.border, borderWidth: 1 });
+  page.drawRectangle({ x: left, y: top - height, width: 3.5, height, color: colors.cyan });
+  page.drawText(label, { x: left + pad, y: top - 13, size: 7.5, font: bold, color: colors.cyan });
+  safeLines.forEach((l, i) => page.drawText(l, { x: left + pad, y: top - 25 - i * 10, size: 8, font: bold, color: colors.primary }));
+
+  page.drawRectangle({ x: badgeX, y: top - 21, width: badgeW, height: 16, color: colors.badgeFill, borderColor: colors.badgeStroke, borderWidth: 1 });
+  page.drawText(badgeText, { x: badgeX + 8, y: top - 21 + 4.5, size: 7.5, font: bold, color: colors.badgeText });
+  return height;
 }
 
 /**
@@ -104,14 +167,11 @@ export async function generateQuotationPdf(
     const rightColStartX = right - rightColWidth;
     const maxCompanyWidth = rightColStartX - companyX - 10;
 
-    let companySize = 11.5;
-    while (companySize > 8 && bold.widthOfTextAtSize(settings.businessName.toUpperCase(), companySize) > maxCompanyWidth) {
-      companySize -= 0.5;
-    }
-    page.drawText(settings.businessName.toUpperCase(), {
+    const companyFit = shrinkToFit(bold, settings.businessName.toUpperCase(), 11.5, 8, maxCompanyWidth);
+    page.drawText(companyFit.text, {
       x: companyX,
       y: y - 22,
-      size: companySize,
+      size: companyFit.size,
       font: bold,
       color: white,
     });
@@ -145,31 +205,35 @@ export async function generateQuotationPdf(
     const docTitle = quotation.revisionNumber > 0
       ? `QUOTATION (REV ${quotation.revisionNumber})${isContinuation ? ` - P.${pageIndex}` : ''}`
       : `FORMAL QUOTATION${isContinuation ? ` - P.${pageIndex}` : ''}`;
-    const titleW = bold.widthOfTextAtSize(docTitle, 12);
-    page.drawText(docTitle, {
+    const rightMaxW = rightColWidth - 12;
+    const titleFit = shrinkToFit(bold, docTitle, 12, 8, rightMaxW);
+    const titleW = bold.widthOfTextAtSize(titleFit.text, titleFit.size);
+    page.drawText(titleFit.text, {
       x: right - 12 - titleW,
       y: y - 22, // Vertically aligned with company name
-      size: 12,
+      size: titleFit.size,
       font: bold,
       color: amber,
     });
 
     const refText = `Ref: ${quotation.quotationNumber}`;
-    const refW = bold.widthOfTextAtSize(refText, 9.5);
-    page.drawText(refText, {
+    const refFit = shrinkToFit(bold, refText, 9.5, 7, rightMaxW);
+    const refW = bold.widthOfTextAtSize(refFit.text, refFit.size);
+    page.drawText(refFit.text, {
       x: right - 12 - refW,
       y: y - 36, // Vertically aligned with tagline
-      size: 9.5,
+      size: refFit.size,
       font: bold,
       color: white,
     });
 
     const dateText = `Issued: ${quotation.issueDate} | Valid: ${quotation.expiryDate}`;
-    const dateW = regular.widthOfTextAtSize(dateText, 7.5);
-    page.drawText(dateText, {
+    const dateFit = shrinkToFit(regular, dateText, 7.5, 6, rightMaxW);
+    const dateW = regular.widthOfTextAtSize(dateFit.text, dateFit.size);
+    page.drawText(dateFit.text, {
       x: right - 12 - dateW,
       y: y - 48, // Vertically aligned with contact line
-      size: 7.5,
+      size: dateFit.size,
       font: regular,
       color: rgb(0.8, 0.85, 0.92),
     });
@@ -184,10 +248,14 @@ export async function generateQuotationPdf(
       ['CATEGORY', 75],
       ['DESCRIPTION / SPECIFICATIONS', 145],
       ['QTY & UNIT', 365],
-      ['UNIT PRICE (PHP)', 435],
+      ['UNIT PRICE (PHP)', 426],
       ['TOTAL (PHP)', 505],
     ];
-    labels.forEach(([label, xPos]) => page.drawText(String(label), { x: Number(xPos), y: y - 12, size: 7.5, font: bold, color: white }));
+    labels.forEach(([label, xPos], i) => {
+      const isAmount = i === labels.length - 1; // right-align the amount column to the banner edge
+      const lx = isAmount ? right - 8 - bold.widthOfTextAtSize(String(label), 7.5) : Number(xPos);
+      page.drawText(String(label), { x: lx, y: y - 12, size: 7.5, font: bold, color: white });
+    });
     y -= 22;
   };
 
@@ -250,49 +318,13 @@ export async function generateQuotationPdf(
 
   y = Math.min(fromY, toY) - 14;
 
-  // Project / Service Callout Box with Cyan Left Edge and Category Badge
-  const calloutHeight = 28;
-  page.drawRectangle({ x: left, y: y - calloutHeight, width: right - left, height: calloutHeight, color: pale, borderColor: border, borderWidth: 1 });
-  page.drawRectangle({ x: left, y: y - calloutHeight, width: 3.5, height: calloutHeight, color: cyan });
-
-  // Service Category Badge on the right
-  const catText = quotation.serviceCategory;
-  const catW = regular.widthOfTextAtSize(catText, 7.5);
-  const badgeW = catW + 16;
-  const badgeX = right - 10 - badgeW;
-  const badgeY = y - 22;
-  page.drawRectangle({
-    x: badgeX,
-    y: badgeY,
-    width: badgeW,
-    height: 16,
-    color: rgb(0.92, 0.97, 1),
-    borderColor: cyan,
-    borderWidth: 1,
+  // Project / Service callout: subject wraps in its own column, category badge has its own column
+  const calloutHeight = drawSubjectCallout({
+    page, left, right, top: y,
+    label: 'PROJECT / SERVICE:', subject: quotation.projectTitle || '-', badge: quotation.serviceCategory || '',
+    regular, bold,
+    colors: { primary, cyan, pale, border, badgeFill: rgb(0.92, 0.97, 1), badgeStroke: cyan, badgeText: cyan },
   });
-  page.drawText(catText, {
-    x: badgeX + 8,
-    y: badgeY + 4.5,
-    size: 7.5,
-    font: bold,
-    color: cyan,
-  });
-
-  const projLabel = 'PROJECT / SERVICE:';
-  page.drawText(projLabel, { x: left + 10, y: y - 17, size: 7.5, font: bold, color: cyan });
-  const labelW = bold.widthOfTextAtSize(projLabel, 7.5);
-
-  const titleStartX = left + 10 + labelW + 6;
-  const maxTitleW = badgeX - 10 - titleStartX;
-  let titleStr = quotation.projectTitle.toUpperCase();
-  if (bold.widthOfTextAtSize(titleStr, 8) > maxTitleW) {
-    while (titleStr.length > 3 && bold.widthOfTextAtSize(titleStr + '...', 8) > maxTitleW) {
-      titleStr = titleStr.slice(0, -1);
-    }
-    titleStr += '...';
-  }
-  page.drawText(titleStr, { x: titleStartX, y: y - 17, size: 8, font: bold, color: primary });
-
   y -= (calloutHeight + 14);
 
   page.drawText('SCOPE OF WORK:', { x: left, y, size: 8, font: bold, color: primary });
@@ -307,11 +339,14 @@ export async function generateQuotationPdf(
     if (y - rowHeight < 110) newContentPage();
     if (index % 2 === 0) page.drawRectangle({ x: left, y: y - rowHeight, width: right - left, height: rowHeight, color: pale });
     page.drawText(`${index + 1}`, { x: 50, y: y - 13, size: 8, font: regular, color: text });
-    page.drawText(item.category || 'Materials', { x: 75, y: y - 13, size: 7.5, font: regular, color: text });
+    page.drawText(fitLine(regular, item.category || 'Materials', 7.5, 62), { x: 75, y: y - 13, size: 7.5, font: regular, color: text });
     descriptionLines.forEach((line, lineIndex) => page.drawText(line, { x: 145, y: y - 11 - lineIndex * 10, size: 7.5, font: regular, color: primary }));
-    page.drawText(`${item.quantity} ${item.unit}`, { x: 365, y: y - 13, size: 7.5, font: regular, color: text });
-    page.drawText(fromCentavos(item.unitPriceCentavos).toFixed(2), { x: 435, y: y - 13, size: 7.5, font: regular, color: text });
-    page.drawText(fromCentavos(item.totalCentavos).toFixed(2), { x: 505, y: y - 13, size: 7.5, font: bold, color: primary });
+    page.drawText(fitLine(regular, `${item.quantity} ${item.unit}`, 7.5, 56), { x: 365, y: y - 13, size: 7.5, font: regular, color: text });
+    page.drawText(fromCentavos(item.unitPriceCentavos).toFixed(2), { x: 426, y: y - 13, size: 7.5, font: regular, color: text });
+    {
+      const amt = fromCentavos(item.totalCentavos).toFixed(2);
+      page.drawText(amt, { x: right - 8 - bold.widthOfTextAtSize(amt, 7.5), y: y - 13, size: 7.5, font: bold, color: primary });
+    }
     y -= rowHeight;
   });
 
@@ -323,8 +358,12 @@ export async function generateQuotationPdf(
   const totalsX = 350;
   const valueRightX = right - 12;
   const drawTotal = (label: string, value: string) => {
-    page.drawText(label, { x: totalsX, y, size: 8.5, font: regular, color: text });
+    const labelW = regular.widthOfTextAtSize(label, 8.5);
     const valWidth = regular.widthOfTextAtSize(value, 8.5);
+    page.drawText(label, { x: totalsX, y, size: 8.5, font: regular, color: text });
+    if (totalsX + labelW + 10 > valueRightX - valWidth) {
+      y -= 11; // not enough room on one line: value goes on its own right-aligned line
+    }
     page.drawText(value, { x: valueRightX - valWidth, y, size: 8.5, font: regular, color: text });
     y -= 15;
   };
@@ -346,10 +385,12 @@ export async function generateQuotationPdf(
   page.drawText('GRAND TOTAL:', { x: totalsX, y: y - 11, size: 9, font: bold, color: white });
   const gtText = formatPhp(quotation.grandTotalCentavos);
   const gtWidth = bold.widthOfTextAtSize(gtText, 9.5);
-  page.drawText(gtText, {
-    x: valueRightX - gtWidth,
+  const gtOverlap = totalsX + bold.widthOfTextAtSize('GRAND TOTAL:', 9) + 8 > valueRightX - gtWidth;
+  const gtFit = gtOverlap ? shrinkToFit(bold, gtText, 9.5, 6.5, valueRightX - (totalsX + bold.widthOfTextAtSize('GRAND TOTAL:', 9) + 8)) : { text: gtText, size: 9.5 };
+  page.drawText(gtFit.text, {
+    x: valueRightX - bold.widthOfTextAtSize(gtFit.text, gtFit.size),
     y: y - 11,
-    size: 9.5,
+    size: gtFit.size,
     font: bold,
     color: amber,
   });
@@ -754,14 +795,11 @@ export async function generateInvoicePdf(
     const rightColStartX = right - rightColWidth;
     const maxCompanyWidth = rightColStartX - companyX - 10;
 
-    let companySize = 11.5;
-    while (companySize > 8 && bold.widthOfTextAtSize(settings.businessName.toUpperCase(), companySize) > maxCompanyWidth) {
-      companySize -= 0.5;
-    }
-    page.drawText(settings.businessName.toUpperCase(), {
+    const companyFit = shrinkToFit(bold, settings.businessName.toUpperCase(), 11.5, 8, maxCompanyWidth);
+    page.drawText(companyFit.text, {
       x: companyX,
       y: y - 22,
-      size: companySize,
+      size: companyFit.size,
       font: bold,
       color: white,
     });
@@ -795,31 +833,35 @@ export async function generateInvoicePdf(
     const docTitle = isContinuation
       ? `BILLING INVOICE (P.${pageIndex})`
       : 'BILLING INVOICE';
-    const titleW = bold.widthOfTextAtSize(docTitle, 12);
-    page.drawText(docTitle, {
+    const rightMaxW = rightColWidth - 12;
+    const titleFit = shrinkToFit(bold, docTitle, 12, 8, rightMaxW);
+    const titleW = bold.widthOfTextAtSize(titleFit.text, titleFit.size);
+    page.drawText(titleFit.text, {
       x: right - 12 - titleW,
       y: y - 22, // Vertically aligned with company name
-      size: 12,
+      size: titleFit.size,
       font: bold,
       color: amber,
     });
 
     const refText = `No: ${invoice.invoiceNumber}`;
-    const refW = bold.widthOfTextAtSize(refText, 9.5);
-    page.drawText(refText, {
+    const refFit = shrinkToFit(bold, refText, 9.5, 7, rightMaxW);
+    const refW = bold.widthOfTextAtSize(refFit.text, refFit.size);
+    page.drawText(refFit.text, {
       x: right - 12 - refW,
       y: y - 36, // Vertically aligned with tagline
-      size: 9.5,
+      size: refFit.size,
       font: bold,
       color: white,
     });
 
     const dateText = `Issued: ${invoice.issueDate} | Due: ${invoice.dueDate}`;
-    const dateW = regular.widthOfTextAtSize(dateText, 7.5);
-    page.drawText(dateText, {
+    const dateFit = shrinkToFit(regular, dateText, 7.5, 6, rightMaxW);
+    const dateW = regular.widthOfTextAtSize(dateFit.text, dateFit.size);
+    page.drawText(dateFit.text, {
       x: right - 12 - dateW,
       y: y - 48, // Vertically aligned with contact line
-      size: 7.5,
+      size: dateFit.size,
       font: regular,
       color: rgb(0.8, 0.85, 0.92),
     });
@@ -833,11 +875,13 @@ export async function generateInvoicePdf(
       ['NO.', 48],
       ['ITEM DESCRIPTION / SCOPE', 75],
       ['QTY & UNIT', 360],
-      ['UNIT PRICE (PHP)', 430],
+      ['UNIT PRICE (PHP)', 418],
       ['AMOUNT (PHP)', 505],
     ];
-    labels.forEach(([label, xPos]) => {
-      page.drawText(label, { x: xPos, y: y - 12, size: 7.5, font: bold, color: white });
+    labels.forEach(([label, xPos], i) => {
+      const isAmount = i === labels.length - 1; // right-align the amount column to the banner edge
+      const lx = isAmount ? right - 8 - bold.widthOfTextAtSize(label, 7.5) : xPos;
+      page.drawText(label, { x: lx, y: y - 12, size: 7.5, font: bold, color: white });
     });
     y -= 22;
   };
@@ -911,77 +955,19 @@ export async function generateInvoicePdf(
 
   y = Math.min(fromY, toY) - 14;
 
-  // 3. Subject / Billing For Callout Box with Cyan Left Edge Accent & Status Badge
-  const calloutHeight = 28;
-  page.drawRectangle({
-    x: left,
-    y: y - calloutHeight,
-    width: right - left,
-    height: calloutHeight,
-    color: pale,
-    borderColor: border,
-    borderWidth: 1,
-  });
-  page.drawRectangle({
-    x: left,
-    y: y - calloutHeight,
-    width: 3.5,
-    height: calloutHeight,
-    color: cyan,
-  });
-
-  // Dedicated Status Pill Badge on the right
+  // 3. Subject / Billing For callout: subject wraps in its own column, status pill has its own column
   const statusStr = invoice.status.toUpperCase();
   const statusColor = invoice.status === 'Paid' ? success : invoice.status === 'Overdue' ? danger : cyan;
-  const statusTextW = bold.widthOfTextAtSize(statusStr, 7.5);
-  const badgeW = statusTextW + 16;
-  const badgeX = right - 10 - badgeW;
-  const badgeY = y - 22;
-  page.drawRectangle({
-    x: badgeX,
-    y: badgeY,
-    width: badgeW,
-    height: 16,
-    color: invoice.status === 'Paid' ? rgb(0.9, 0.98, 0.92) : invoice.status === 'Overdue' ? rgb(0.99, 0.92, 0.92) : rgb(0.92, 0.97, 1),
-    borderColor: statusColor,
-    borderWidth: 1,
+  const calloutHeight = drawSubjectCallout({
+    page, left, right, top: y,
+    label: 'SUBJECT / BILLING FOR:', subject: invoice.title || '-', badge: statusStr,
+    regular, bold,
+    colors: {
+      primary, cyan, pale, border,
+      badgeFill: invoice.status === 'Paid' ? rgb(0.9, 0.98, 0.92) : invoice.status === 'Overdue' ? rgb(0.99, 0.92, 0.92) : rgb(0.92, 0.97, 1),
+      badgeStroke: statusColor, badgeText: statusColor,
+    },
   });
-  page.drawText(statusStr, {
-    x: badgeX + 8,
-    y: badgeY + 4.5,
-    size: 7.5,
-    font: bold,
-    color: statusColor,
-  });
-
-  // Label & Subject Title (Guaranteed no overlap with badge)
-  const label = 'SUBJECT / BILLING FOR:';
-  page.drawText(label, {
-    x: left + 10,
-    y: y - 17,
-    size: 7.5,
-    font: bold,
-    color: cyan,
-  });
-  const labelW = bold.widthOfTextAtSize(label, 7.5);
-
-  const titleStartX = left + 10 + labelW + 6;
-  const maxTitleW = badgeX - 10 - titleStartX;
-  let titleStr = invoice.title.toUpperCase();
-  if (bold.widthOfTextAtSize(titleStr, 8) > maxTitleW) {
-    while (titleStr.length > 3 && bold.widthOfTextAtSize(titleStr + '...', 8) > maxTitleW) {
-      titleStr = titleStr.slice(0, -1);
-    }
-    titleStr += '...';
-  }
-  page.drawText(titleStr, {
-    x: titleStartX,
-    y: y - 17,
-    size: 8,
-    font: bold,
-    color: primary,
-  });
-
   y -= (calloutHeight + 14);
 
   // 4. Line Items Table
@@ -1012,16 +998,17 @@ export async function generateInvoicePdf(
         color: primary,
       });
     });
-    page.drawText(`${item.quantity} ${item.unit}`, { x: 360, y: y - 13, size: 7.5, font: regular, color: text });
+    page.drawText(fitLine(regular, `${item.quantity} ${item.unit}`, 7.5, 54), { x: 360, y: y - 13, size: 7.5, font: regular, color: text });
     page.drawText(fromCentavos(item.unitPriceCentavos).toFixed(2), {
-      x: 430,
+      x: 418,
       y: y - 13,
       size: 7.5,
       font: regular,
       color: text,
     });
-    page.drawText(fromCentavos(item.totalCentavos).toFixed(2), {
-      x: 505,
+    const amountText = fromCentavos(item.totalCentavos).toFixed(2);
+    page.drawText(amountText, {
+      x: right - 8 - bold.widthOfTextAtSize(amountText, 7.5),
       y: y - 13,
       size: 7.5,
       font: bold,
@@ -1047,8 +1034,12 @@ export async function generateInvoicePdf(
   const totalsX = 350;
   const valueRightX = right - 12;
   const drawTotalRow = (label: string, value: string, font = regular, color = text, size = 8.5) => {
-    page.drawText(label, { x: totalsX, y, size, font, color });
+    const labelW = font.widthOfTextAtSize(label, size);
     const valWidth = font.widthOfTextAtSize(value, size);
+    page.drawText(label, { x: totalsX, y, size, font, color });
+    if (totalsX + labelW + 10 > valueRightX - valWidth) {
+      y -= 11; // not enough room on one line: value goes on its own right-aligned line
+    }
     page.drawText(value, { x: valueRightX - valWidth, y, size, font, color });
     y -= 15;
   };
@@ -1080,11 +1071,11 @@ export async function generateInvoicePdf(
   });
   page.drawText('BALANCE DUE:', { x: totalsX, y: y - 11, size: 9, font: bold, color: white });
   const balText = formatPhp(invoice.remainingBalanceCentavos);
-  const balWidth = bold.widthOfTextAtSize(balText, 9.5);
-  page.drawText(balText, {
-    x: valueRightX - balWidth,
+  const balFit = shrinkToFit(bold, balText, 9.5, 6.5, valueRightX - (totalsX + bold.widthOfTextAtSize('BALANCE DUE:', 9) + 8));
+  page.drawText(balFit.text, {
+    x: valueRightX - bold.widthOfTextAtSize(balFit.text, balFit.size),
     y: y - 11,
-    size: 9.5,
+    size: balFit.size,
     font: bold,
     color: white,
   });
