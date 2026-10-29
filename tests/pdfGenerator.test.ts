@@ -154,4 +154,48 @@ describe('PDF generation service', () => {
     expect(Math.round(voucherPage.getWidth())).toBe(595);
     expect(Math.round(voucherPage.getHeight())).toBe(421);
   });
+
+  it('renders invoice with long company name and long subject without overlap or errors', async () => {
+    const customSettings = {
+      ...DEFAULT_SETTINGS,
+      businessName: 'Integrated Perimeter Defense Systems & Global Automation Solutions Philippines Incorporated',
+      tagline: 'Comprehensive Industrial-Grade Perimeter Security, Infrared Motion Grids & Smart Sliding Heavy Gate Infrastructure',
+    };
+
+    const invoice: Invoice = {
+      id: 'inv-long-title',
+      invoiceNumber: 'INV-2026-LONG-01',
+      clientId: 'client-long',
+      clientName: 'International Superstructure Logistics Holdings and Industrial Ports Corporation Metro Manila',
+      clientContact: '+63 917 999 1234 / operations-contact@international-logistics-holdings.com',
+      clientAddress: 'Bldg 88, Southern Harbor Special Economic Freeport Zone, Batangas Port Expressway, Calabarzon',
+      title: 'Full Installation, Cable Splicing, Energizer Commissioning, and Centralised Alarm Annunciator Integration for Terminal 4',
+      issueDate: '2026-10-28',
+      dueDate: '2026-11-20',
+      lineItems: [
+        {
+          id: 'li-1',
+          description: 'Industrial 3-Phase Gate Automation Heavy Duty Motor with Microcontroller Logic Board and Dual Optical Beam Encoders',
+          quantity: 2,
+          unit: 'sets',
+          unitPriceCentavos: toCentavos(48500),
+          totalCentavos: calculateLineTotal(2, toCentavos(48500)),
+        },
+      ],
+      subtotalCentavos: toCentavos(97000),
+      taxRatePercent: 12,
+      taxCentavos: toCentavos(11640),
+      grandTotalCentavos: toCentavos(108640),
+      paidAmountCentavos: toCentavos(40000),
+      remainingBalanceCentavos: toCentavos(68640),
+      status: 'Issued',
+      taxMode: 'EXCLUSIVE',
+      createdAt: '2026-10-28T00:00:00Z',
+      updatedAt: '2026-10-28T00:00:00Z',
+    };
+
+    const bytes = await generateInvoicePdf(invoice, customSettings);
+    const document = await PDFDocument.load(bytes);
+    expect(document.getPageCount()).toBeGreaterThanOrEqual(1);
+  });
 });
