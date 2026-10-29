@@ -8,13 +8,13 @@ SentinelOps is a substantial offline-first operations application for security-i
 
 The shared-cloud layer is not yet production-ready for real financial data. The API currently behaves primarily as a tenant-scoped generic JSON synchronization store. It does not yet provide authoritative relational financial aggregates, complete server identity and role management, verified attachment persistence, tested disaster recovery, or end-to-end two-device assurance. The application should be treated as local-first beta software until the P0 gates below are closed.
 
-Validation note: local validation was rerun on 2026-10-29. Frontend tests passed with 12 test files and 84 tests; `npm run lint` passed; `npm run build` passed; and the non-Neon .NET suite passed with 8 tests and 0 failures. The production frontend bundle is 1.56 MB before gzip and triggers Vite's 500 kB chunk warning. The API build also reports an obsolete `KnownNetworks` API use and an unused `NormalizePostgresConnectionString` helper in `Program.cs`.
+Validation note: local validation was rerun on 2026-10-29. Frontend tests passed with 12 test files and 84 tests; `npm run lint` passed; `npm run build` passed; and the non-Neon .NET suite passed with 15 tests and 0 failures. The production frontend bundle is 1.56 MB before gzip and triggers Vite's 500 kB chunk warning. The API warning cleanup was completed: forwarded-header configuration now uses the current API and the unused `NormalizePostgresConnectionString` helper was removed.
 
 Current validation status:
 
 - **Passing:** frontend tests, TypeScript validation, Vite production build, API build, and non-Neon API tests.
 - **Unverified:** Neon/PostgreSQL integration, HTTP endpoint integration, two-device browser workflows, attachment lifecycle, and backup restoration.
-- **Technical debt surfaced by the build:** frontend code splitting, forwarded-header API migration, and removal or use of the unused connection-string helper.
+- **Technical debt surfaced by the build:** targeted frontend code splitting remains.
 
 ## Priority Model
 
@@ -47,11 +47,11 @@ Current validation status:
 
 ### P0.3 Protect credentials and fail closed in production
 
-**Finding:** The browser stores `deviceToken` in IndexedDB through `SyncConfig`; the API can generate ephemeral secrets when production secrets are missing, and `SyncController` contains a fallback cursor signing key. A restart can invalidate cursors or silently change registration credentials.
+**Finding:** The browser stores `deviceToken` in IndexedDB through `SyncConfig`; token rotation and browser-storage exposure remain unresolved. The API previously generated ephemeral secrets when production secrets were missing, and `SyncController` had a fallback cursor signing key; those production fallbacks are now removed.
 
 **Evidence:** [database.ts](../src/storage/database.ts), [syncCoordinator.ts](../src/services/syncCoordinator.ts), [Program.cs](../server/SentinelOps.Api/Program.cs), [SyncController.cs](../server/SentinelOps.Api/Controllers/SyncController.cs).
 
-**Improve:** Refuse production startup when required secrets are absent or weak. Rotate device credentials without exposing long-lived tokens to ordinary browser storage where possible. Add a documented key-rotation procedure and secret redaction checks for logs and errors.
+**Improve:** Complete the implemented fail-closed startup policy with device-token rotation, reduced long-lived-token exposure, a documented key-rotation procedure, and secret redaction checks for logs and errors. Forwarded headers now trust only explicitly configured proxy IPs through `ForwardedHeaders:KnownProxies`.
 
 **Acceptance check:** Production startup fails closed, cursor continuity survives restart, token rotation is tested, and no token, hash, secret, or payload appears in logs.
 

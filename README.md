@@ -119,7 +119,10 @@ dotnet run --project server/SentinelOps.Api
 
 Configure `ConnectionStrings__SentinelOps`, `Sync__RegistrationToken`,
 `Sync__CursorSigningKey`, and explicit `Cors__AllowedOrigins` values outside
-development. Register a device through
+development. If the API is behind a reverse proxy, also configure the proxy IPs
+with `ForwardedHeaders__KnownProxies__0`, `ForwardedHeaders__KnownProxies__1`,
+and so on; forwarded headers are ignored unless the proxy is explicitly trusted.
+Register a device through
 `POST /api/v1/devices/register` using the registration token, then use the returned
 device token as a bearer token for `/api/v1/sync/push` and `/api/v1/sync/changes`.
 The device token is only returned at registration time and is stored server-side as

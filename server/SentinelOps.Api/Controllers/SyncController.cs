@@ -24,7 +24,7 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
     private string CursorSigningKey =>
         configuration["Sync:CursorSigningKey"]
         ?? configuration["SYNC_CURSOR_SIGNING_KEY"]
-        ?? "SentinelOps_Authenticated_Cursor_Key_v1_Fallback";
+        ?? throw new InvalidOperationException("Sync cursor signing key is not configured.");
 
     private static readonly HashSet<string> AllowedLeadStatuses =
         ["New Inquiry", "Contacted", "Site Visit Scheduled", "Site Visit Completed",

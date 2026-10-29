@@ -1,10 +1,12 @@
 using System.Security.Cryptography;
+using System.Net;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using SentinelOps.Api.Configuration;
 using SentinelOps.Api.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -13,18 +15,25 @@ builder.Services.AddProblemDetails();
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
 
-// Container-friendly Forwarded Headers configuration for Render & cloud reverse proxies
+var trustedProxyAddresses = builder.Configuration
+    .GetSection("ForwardedHeaders:KnownProxies")
+    .Get<string[]>() ?? [];
+
+// Forwarded headers are accepted only from explicitly configured proxy addresses.
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
                                ForwardedHeaders.XForwardedProto |
                                ForwardedHeaders.XForwardedHost;
-    // In container platforms like Render, the reverse proxy IP changes dynamically
-    // and is outside loopback. Clearing KnownNetworks and KnownProxies allows
-    // X-Forwarded-* headers from any incoming proxy hop to be processed.
-    options.KnownNetworks.Clear();
+    options.KnownIPNetworks.Clear();
     options.KnownProxies.Clear();
-    options.ForwardLimit = null;
+    foreach (var address in trustedProxyAddresses)
+    {
+        if (IPAddress.TryParse(address, out var parsedAddress))
+        {
+            options.KnownProxies.Add(parsedAddress);
+        }
+    }
 });
 
 // Configure HTTPS redirection to explicitly use port 443 behind reverse proxies
@@ -67,14 +76,17 @@ var cursorKey = ResolveNonEmptyConfig(
     "Sync:CursorSigningKey",
     "CURSOR_SIGNING_KEY");
 
-if (string.IsNullOrWhiteSpace(cursorKey) || cursorKey.Length < 32 || cursorKey.Contains("CHANGE_ME"))
+if (!SecurityConfiguration.IsAcceptableSecret(cursorKey))
 {
+    if (!builder.Environment.IsDevelopment())
+    {
+        throw new InvalidOperationException(
+            "Sync cursor signing key is missing, weak, or a development default. Configure SYNC_CURSOR_SIGNING_KEY before starting a non-development environment.");
+    }
+
     var generatedCursorKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
     builder.Configuration["Sync:CursorSigningKey"] = generatedCursorKey;
-    Console.WriteLine("[WARN] [SentinelOps Security] 'SYNC_CURSOR_SIGNING_KEY' or 'Sync__CursorSigningKey' was not supplied or invalid in configuration. " +
-                      "Generated an ephemeral 256-bit cryptographic signing key for this instance session. " +
-                      "To preserve sync cursor continuity across container restarts or horizontally scaled replicas on Render, " +
-                      "configure 'SYNC_CURSOR_SIGNING_KEY' or 'Sync__CursorSigningKey' in your Render Environment Variables.");
+    Console.WriteLine("[INFO] [SentinelOps Security] Generated an ephemeral development-only cursor signing key.");
 }
 else
 {
@@ -89,13 +101,17 @@ var regToken = ResolveNonEmptyConfig(
     "Sync:RegistrationToken",
     "REGISTRATION_TOKEN");
 
-if (string.IsNullOrWhiteSpace(regToken) || regToken.Length < 16 || regToken.Contains("CHANGE_ME"))
+if (!SecurityConfiguration.IsAcceptableSecret(regToken, minimumLength: 16))
 {
+    if (!builder.Environment.IsDevelopment())
+    {
+        throw new InvalidOperationException(
+            "Sync registration token is missing, weak, or a development default. Configure SYNC_REGISTRATION_TOKEN before starting a non-development environment.");
+    }
+
     var generatedRegToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
     builder.Configuration["Sync:RegistrationToken"] = generatedRegToken;
-    Console.WriteLine($"[WARN] [SentinelOps Security] 'SYNC_REGISTRATION_TOKEN' or 'Sync__RegistrationToken' was not configured. " +
-                      $"Generated an ephemeral device registration token: '{generatedRegToken}'. " +
-                      "To set a permanent secret for device onboarding, configure 'SYNC_REGISTRATION_TOKEN' or 'Sync__RegistrationToken' in Render Environment Variables.");
+    Console.WriteLine("[INFO] [SentinelOps Security] Generated an ephemeral development-only registration token.");
 }
 else
 {
@@ -213,9 +229,6 @@ static async Task WriteHealthResponse(HttpContext context, HealthReport report)
 
     await context.Response.Body.WriteAsync(jsonBytes);
 }
-
-// Helper to support both standard ADO.NET and Render/Neon postgres:// or postgresql:// URIs
-static string NormalizePostgresConnectionString(string connection) => PostgresConnectionHelper.Normalize(connection);
 
 // Scans IConfiguration and Environment Variables for the first non-empty, non-whitespace value
 static string? ResolveNonEmptyConfig(IConfiguration config, params string[] keyNames)
