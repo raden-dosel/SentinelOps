@@ -3,9 +3,10 @@
  * Powered entirely offline by 'pdf-lib'.
  */
 
-import { PDFDocument, PDFFont, PDFPage, RGB, rgb, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFFont, PDFImage, PDFPage, RGB, rgb, StandardFonts } from 'pdf-lib';
 import { Quotation, Invoice, Payment, AppSettings } from '../types';
 import { formatCurrency, fromCentavos, amountInWords } from '../domain/calculations';
+import { LOGO_PNG_BASE64, LOGO_ASPECT_RATIO } from './logoAsset';
 
 
 /** Minimal font contract so layout helpers work with any pdf-lib embedded font. */
@@ -24,6 +25,53 @@ function shrinkToFit(font: Measurable, value: string, startSize: number, minSize
   let size = startSize;
   while (size > minSize && font.widthOfTextAtSize(value, size) > maxWidth) size -= 0.5;
   return { text: fitLine(font, value, size, maxWidth), size };
+}
+
+/** Decoded logo bytes (cached). Returns null if decoding is unavailable. */
+let logoBytesCache: Uint8Array | null | undefined;
+function getLogoBytes(): Uint8Array | null {
+  if (logoBytesCache !== undefined) return logoBytesCache;
+  try {
+    const bin = atob(LOGO_PNG_BASE64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
+    logoBytesCache = bytes;
+  } catch {
+    logoBytesCache = null;
+  }
+  return logoBytesCache;
+}
+
+type EmbeddedLogo = { image: PDFImage } | null;
+
+/** Embeds the official logo once per document; null triggers the drawn text fallback. */
+async function embedLogo(pdfDoc: PDFDocument): Promise<EmbeddedLogo> {
+  const bytes = getLogoBytes();
+  if (!bytes) return null;
+  try {
+    return { image: await pdfDoc.embedPng(bytes) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Draws the logo inside a box of the given height, preserving its aspect ratio.
+ * Falls back to a clean text-only "SEIA" mark when the image is unavailable.
+ * Returns the width consumed so callers can place the company name after it.
+ */
+function drawLogo(
+  page: PDFPage, logo: EmbeddedLogo, x: number, yBottom: number, height: number,
+  bold: PDFFont, textColor: RGB
+): number {
+  if (logo) {
+    const w = height * LOGO_ASPECT_RATIO;
+    page.drawImage(logo.image, { x, y: yBottom, width: w, height });
+    return w;
+  }
+  const w = height;
+  page.drawText('SEIA', { x, y: yBottom + height / 2 - 6, size: 14, font: bold, color: textColor });
+  return Math.max(w, bold.widthOfTextAtSize('SEIA', 14));
 }
 
 // Helpers to format currency and clean strings
@@ -85,6 +133,7 @@ export async function generateQuotationPdf(
   const pdfDoc = await PDFDocument.create();
   const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const logo = await embedLogo(pdfDoc);
   const width = 595.28;
   const height = 841.89;
   const left = 40;
@@ -124,45 +173,12 @@ export async function generateQuotationPdf(
     page.drawRectangle({ x: left, y: y - bannerHeight, width: right - left, height: bannerHeight, color: primary });
     page.drawRectangle({ x: left, y: y - bannerHeight - 2, width: right - left, height: 2, color: cyan });
 
-    // 1. Dedicated Logo in the topmost left
-    const logoX = left + 8;
-    const logoY = y - bannerHeight + 11;
-    const logoW = 44;
-    const logoH = 46;
-
-    page.drawRectangle({
-      x: logoX,
-      y: logoY,
-      width: logoW,
-      height: logoH,
-      color: rgb(0.1, 0.15, 0.25),
-      borderColor: cyan,
-      borderWidth: 1.2,
-    });
-    page.drawRectangle({
-      x: logoX + 5,
-      y: logoY + 16,
-      width: 34,
-      height: 24,
-      color: cyan,
-    });
-    page.drawText('SO', {
-      x: logoX + 10,
-      y: logoY + 22,
-      size: 14,
-      font: bold,
-      color: white,
-    });
-    page.drawText('SECURITY', {
-      x: logoX + 4.5,
-      y: logoY + 5.5,
-      size: 5.5,
-      font: bold,
-      color: rgb(0.65, 0.82, 0.96),
-    });
+    // 1. Official logo in the topmost-left corner (aspect ratio preserved)
+    const logoH = bannerHeight - 10;
+    const logoW = drawLogo(page, logo, left + 8, y - bannerHeight + 5, logoH, bold, white);
 
     // 2. Company branding to the right of logo
-    const companyX = left + 60;
+    const companyX = left + 8 + logoW + 10;
     const rightColWidth = 195;
     const rightColStartX = right - rightColWidth;
     const maxCompanyWidth = rightColStartX - companyX - 10;
@@ -709,6 +725,7 @@ export async function generateInvoicePdf(
   const pdfDoc = await PDFDocument.create();
   const regular = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const logo = await embedLogo(pdfDoc);
   const width = 595.28;
   const height = 841.89;
   const left = 40;
@@ -752,45 +769,12 @@ export async function generateInvoicePdf(
     page.drawRectangle({ x: left, y: y - bannerHeight, width: right - left, height: bannerHeight, color: primary });
     page.drawRectangle({ x: left, y: y - bannerHeight - 2, width: right - left, height: 2, color: cyan });
 
-    // 1. Dedicated Logo in the topmost left
-    const logoX = left + 8;
-    const logoY = y - bannerHeight + 11;
-    const logoW = 44;
-    const logoH = 46;
-
-    page.drawRectangle({
-      x: logoX,
-      y: logoY,
-      width: logoW,
-      height: logoH,
-      color: rgb(0.1, 0.15, 0.25),
-      borderColor: cyan,
-      borderWidth: 1.2,
-    });
-    page.drawRectangle({
-      x: logoX + 5,
-      y: logoY + 16,
-      width: 34,
-      height: 24,
-      color: cyan,
-    });
-    page.drawText('SO', {
-      x: logoX + 10,
-      y: logoY + 22,
-      size: 14,
-      font: bold,
-      color: white,
-    });
-    page.drawText('SECURITY', {
-      x: logoX + 4.5,
-      y: logoY + 5.5,
-      size: 5.5,
-      font: bold,
-      color: rgb(0.65, 0.82, 0.96),
-    });
+    // 1. Official logo in the topmost-left corner (aspect ratio preserved)
+    const logoH = bannerHeight - 10;
+    const logoW = drawLogo(page, logo, left + 8, y - bannerHeight + 5, logoH, bold, white);
 
     // 2. Company branding to the right of logo
-    const companyX = left + 60;
+    const companyX = left + 8 + logoW + 10;
     const rightColWidth = 195;
     const rightColStartX = right - rightColWidth;
     const maxCompanyWidth = rightColStartX - companyX - 10;
@@ -1169,43 +1153,11 @@ export async function generatePaymentReceiptPdf(
     color: cyanColor,
   });
 
-  // Logo in topmost left
-  const logoX = 42;
-  const logoY = y - bannerHeight + 8;
-  const logoW = 34;
-  const logoH = 34;
-  page.drawRectangle({
-    x: logoX,
-    y: logoY,
-    width: logoW,
-    height: logoH,
-    color: rgb(0.1, 0.15, 0.25),
-    borderColor: cyanColor,
-    borderWidth: 1,
-  });
-  page.drawRectangle({
-    x: logoX + 4,
-    y: logoY + 11,
-    width: 26,
-    height: 18,
-    color: cyanColor,
-  });
-  page.drawText('SO', {
-    x: logoX + 8,
-    y: logoY + 15,
-    size: 11,
-    font: fontBold,
-    color: rgb(1, 1, 1),
-  });
-  page.drawText('CR', {
-    x: logoX + 11,
-    y: logoY + 3.5,
-    size: 5,
-    font: fontBold,
-    color: rgb(0.7, 0.85, 0.98),
-  });
+  // Official logo in topmost left (aspect ratio preserved)
+  const receiptLogo = await embedLogo(pdfDoc);
+  const receiptLogoW = drawLogo(page, receiptLogo, 42, y - bannerHeight + 4, bannerHeight - 8, fontBold, rgb(1, 1, 1));
 
-  const companyX = 84;
+  const companyX = 42 + receiptLogoW + 10;
   const rightColWidth = 160;
   const maxCompanyWidth = width - 45 - rightColWidth - companyX - 10;
 
