@@ -43,9 +43,11 @@ builder.Services.AddHttpsRedirection(options =>
     options.RedirectStatusCode = StatusCodes.Status308PermanentRedirect;
 });
 
-// Support both standard ConnectionStrings:SentinelOps and Render/Cloud DATABASE_URL
+// Support standard ConnectionStrings:SentinelOps, dedicated migration secret, and Render/Neon DATABASE_URL
 var rawConnectionString = ResolveNonEmptyConfig(
     builder.Configuration,
+    "NEON_MIGRATION_CONNECTION_STRING",
+    "NEON_CONNECTION_STRING",
     "ConnectionStrings:SentinelOps",
     "ConnectionStrings__SentinelOps",
     "DATABASE_URL",

@@ -37,20 +37,29 @@ jobs:
 
       - name: Validate Neon database secrets
         env:
+          NEON_MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING }}
           NEON_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
         run: |
-          test -n "$NEON_CONNECTION_STRING" || {
-            echo "::error::NEON_CONNECTION_STRING is not configured in the production environment."
+          if [ -z "${NEON_MIGRATION_CONNECTION_STRING:-}" ] && [ -z "${NEON_CONNECTION_STRING:-}" ]; then
+            echo "::error::NEON_MIGRATION_CONNECTION_STRING is not configured."
             exit 1
-          }
+          fi
+          echo "Migration connection configured: yes"
+
+      - name: Verify EF model has no pending changes
+        run: |
+          dotnet ef migrations has-pending-model-changes \
+            --project server/SentinelOps.Api/SentinelOps.Api.csproj \
+            --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
 
       - name: Apply migrations to Neon
         shell: bash
         env:
-          MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_CONNECTION_STRING }}
+          MIGRATION_CONNECTION_STRING: ${{ secrets.NEON_MIGRATION_CONNECTION_STRING || secrets.NEON_CONNECTION_STRING }}
+          ASPNETCORE_ENVIRONMENT: Production
         run: |
           if [[ -z "${MIGRATION_CONNECTION_STRING//[[:space:]]/}" ]]; then
-            echo "::error::NEON_CONNECTION_STRING is empty or unavailable."
+            echo "::error::NEON_MIGRATION_CONNECTION_STRING is empty or unavailable."
             echo "::error::Check the production environment secret and workflow revision."
             exit 1
           fi
@@ -58,6 +67,7 @@ jobs:
           export ConnectionStrings__SentinelOps="$MIGRATION_CONNECTION_STRING"
           unset MIGRATION_CONNECTION_STRING
 
+          echo "Applying EF Core migrations to target database..."
           dotnet ef database update \
             --project server/SentinelOps.Api/SentinelOps.Api.csproj \
             --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
@@ -139,6 +149,7 @@ jobs:
       - run: dotnet tool install --global dotnet-ef --version 10.0.1
       - run: dotnet build server/SentinelOps.Api/SentinelOps.Api.csproj --no-restore
       - run: dotnet test server/SentinelOps.Api.Tests/SentinelOps.Api.Tests.csproj --filter "Category!=NeonIntegration"
+      - run: dotnet ef migrations has-pending-model-changes --project server/SentinelOps.Api/SentinelOps.Api.csproj --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
       - run: dotnet ef database update --project server/SentinelOps.Api/SentinelOps.Api.csproj --startup-project server/SentinelOps.Api/SentinelOps.Api.csproj
         env:
           ConnectionStrings__SentinelOps: Host=localhost;Port=5432;Database=sentinelops;Username=sentinelops;Password=development-only
