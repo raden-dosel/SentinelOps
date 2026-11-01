@@ -21,6 +21,7 @@ import {
   getNextSequenceNumber,
 } from '../features/projects/projectImageNaming';
 import { generateUUID } from './security';
+import { buildProjectDetailsSnapshot } from './portfolioExportService';
 
 export type R2UploadState =
   | 'selected'
@@ -408,6 +409,7 @@ export async function uploadSingleFileToR2(
       r2FolderName: currentItem.folderName,
       etag: finalizeResult?.etag,
       storageProvider: 'cloudflare-r2',
+      projectMetadataSnapshot: buildProjectDetailsSnapshot(project),
       // Cache compressed blob locally for immediate offline previews
       blob: uploadFile,
     };

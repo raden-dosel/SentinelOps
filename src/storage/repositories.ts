@@ -1160,6 +1160,7 @@ export const attachmentRepository = {
       r2FolderName: finalRecord.r2FolderName,
       etag: finalRecord.etag,
       storageProvider: finalRecord.storageProvider,
+      projectMetadataSnapshot: finalRecord.projectMetadataSnapshot,
     };
     if (tx.objectStoreNames.contains('syncOutbox')) {
       enqueueOutboxRecord(

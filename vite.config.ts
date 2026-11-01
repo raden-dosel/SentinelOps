@@ -11,57 +11,59 @@ export default defineConfig(({ command }) => {
     plugins: [
       react(),
       tailwindcss(),
-      VitePWA({
-        disable: isDev,
-        injectRegister: null,
-        registerType: 'prompt',
-        includeAssets: ['icons/*.png'],
-        manifest: {
-          id: './',
-          name: 'SentinelOps — Business Operations Management System',
-          short_name: 'SentinelOps',
-          description: 'Offline-first business operations management for security installation services.',
-          theme_color: '#0f172a',
-          background_color: '#0f172a',
-          display: 'standalone',
-          orientation: 'any',
-          start_url: './',
-          scope: './',
-          icons: [
-            {
-              src: 'icons/icon-192.png',
-              sizes: '192x192',
-              type: 'image/png',
-              purpose: 'any'
-            },
-            {
-              src: 'icons/icon-512.png',
-              sizes: '512x512',
-              type: 'image/png',
-              purpose: 'any'
-            },
-            {
-              src: 'icons/icon-maskable-512.png',
-              sizes: '512x512',
-              type: 'image/png',
-              purpose: 'maskable'
-            }
+      ...(!isDev
+        ? [
+            VitePWA({
+              injectRegister: null,
+              registerType: 'prompt',
+              includeAssets: ['icons/*.png'],
+              manifest: {
+                id: './',
+                name: 'SentinelOps — Business Operations Management System',
+                short_name: 'SentinelOps',
+                description: 'Offline-first business operations management for security installation services.',
+                theme_color: '#0f172a',
+                background_color: '#0f172a',
+                display: 'standalone',
+                orientation: 'any',
+                start_url: './',
+                scope: './',
+                icons: [
+                  {
+                    src: 'icons/icon-192.png',
+                    sizes: '192x192',
+                    type: 'image/png',
+                    purpose: 'any',
+                  },
+                  {
+                    src: 'icons/icon-512.png',
+                    sizes: '512x512',
+                    type: 'image/png',
+                    purpose: 'any',
+                  },
+                  {
+                    src: 'icons/icon-maskable-512.png',
+                    sizes: '512x512',
+                    type: 'image/png',
+                    purpose: 'maskable',
+                  },
+                ],
+              },
+              workbox: {
+                maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
+                globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+                cleanupOutdatedCaches: true,
+                navigateFallback: 'index.html',
+              },
+            }),
           ]
-        },
-        workbox: {
-          maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          cleanupOutdatedCaches: true,
-          navigateFallback: 'index.html',
-        },
-        devOptions: {
-          enabled: false
-        }
-      })
+        : []),
     ],
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, './src'),
+        'virtual:pwa-register/react': path.resolve(import.meta.dirname, './src/hooks/useRegisterSW.ts'),
+        'virtual:pwa-register': path.resolve(import.meta.dirname, './src/hooks/useRegisterSW.ts'),
       },
     },
     server: {

@@ -396,10 +396,83 @@ export interface AttachmentMetadata {
   r2FolderName?: string;
   etag?: string;
   storageProvider?: 'local' | 'cloudflare-r2' | 'cloudinary';
+  projectMetadataSnapshot?: ProjectDetailsSnapshot;
 }
 
 export interface AttachmentRecord extends AttachmentMetadata {
   blob?: Blob;
+}
+
+// --- Portfolio & Project Metadata Export ---
+export interface ProjectFinancialSummary {
+  totalQuotedCentavos: number;
+  totalInvoicedCentavos: number;
+  totalPaidCentavos: number;
+  balanceDueCentavos: number;
+  formattedQuoted: string;
+  formattedInvoiced: string;
+  formattedPaid: string;
+  formattedBalanceDue: string;
+}
+
+export interface ProjectClientSnapshot {
+  id: ID;
+  name: string;
+  contactPerson?: string;
+  contactNumber?: string;
+  email?: string;
+  address?: string;
+  city?: string;
+  leadSource?: LeadSource;
+  leadStatus?: LeadStatus;
+}
+
+export interface ProjectDetailsSnapshot {
+  id: ID;
+  projectNumber: string;
+  name: string;
+  serviceCategory: ServiceCategory;
+  status: ProjectStatus;
+  siteAddress: string;
+  description: string;
+  scopeOfWork: string;
+  startDate?: string;
+  targetCompletionDate?: string;
+  actualCompletionDate?: string;
+  quotationId?: ID;
+  quotationNumber?: string;
+  client: ProjectClientSnapshot;
+  financials: ProjectFinancialSummary;
+  progressNotes: ProjectProgressNote[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectImageReference {
+  id: ID;
+  sequenceNumber?: number;
+  fileName: string;
+  displayName?: string;
+  fileType: string;
+  fileSize: number;
+  caption?: string;
+  uploadedAt: string;
+  storageProvider?: 'local' | 'cloudflare-r2' | 'cloudinary';
+  cloudinaryPublicId?: string;
+  cloudinaryUrl?: string;
+  r2ObjectKey?: string;
+  r2Bucket?: string;
+  r2FolderName?: string;
+  etag?: string;
+}
+
+export interface PortfolioProjectExport {
+  schemaVersion: '1.0';
+  exportedAt: string;
+  source: 'SentinelOps';
+  portfolioClassificationReady: boolean;
+  project: ProjectDetailsSnapshot;
+  images: ProjectImageReference[];
 }
 
 // --- Backup & Restore ---

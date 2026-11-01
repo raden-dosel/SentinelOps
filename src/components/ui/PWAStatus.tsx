@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AlertTriangle, CheckCircle2, RefreshCw, X } from 'lucide-react';
-import { useRegisterSW } from 'virtual:pwa-register/react';
+import { useRegisterSW } from '../../hooks/useRegisterSW';
 
 export const PWAStatus: React.FC = () => {
   const [dismissed, setDismissed] = useState(false);

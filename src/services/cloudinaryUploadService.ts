@@ -13,6 +13,7 @@ import { AttachmentRecord, Project } from '../types';
 import { syncConfigRepository, attachmentRepository } from '../storage/repositories';
 import { buildProjectImageName, getNextSequenceNumber } from '../features/projects/projectImageNaming';
 import { generateUUID } from './security';
+import { buildProjectDetailsSnapshot } from './portfolioExportService';
 
 export type FileUploadState =
   | 'selected'
@@ -257,6 +258,7 @@ export async function uploadSingleFileToCloudinary(
       cloudinaryPublicId: cloudinaryResult.public_id,
       cloudinaryUrl: cloudinaryResult.secure_url,
       storageProvider: 'cloudinary',
+      projectMetadataSnapshot: buildProjectDetailsSnapshot(project),
       // Store blob locally as well for offline preview cache
       blob: currentItem.file,
     };

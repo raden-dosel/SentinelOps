@@ -19,6 +19,20 @@
     <script>
       // Suppress Vite HMR / WebSocket client errors in Cloud Run / iframe proxy environment
       (function () {
+        function shouldSuppress(msg) {
+          if (!msg) return false;
+          var s = String(msg);
+          return (
+            s.includes('[vite]') ||
+            s.includes('WebSocket') ||
+            s.includes("reading 'send'") ||
+            s.includes('pwa-entry-point') ||
+            s.includes('registerDevSW') ||
+            s.includes('vite-pwa-plugin') ||
+            s.includes('dev-ready')
+          );
+        }
+
         var origConsoleError = console.error;
         console.error = function () {
           var str = '';
@@ -30,53 +44,64 @@
               str += (a.message || '') + ' ' + (a.stack || '') + ' ' + String(a) + ' ';
             }
           }
-          if (
-            str.includes('[vite] failed to connect to websocket') ||
-            str.includes('WebSocket (failing)') ||
-            str.includes('Check out your Vite / network configuration') ||
-            str.includes("reading 'send'") ||
-            str.includes('pwa-entry-point-loaded') ||
-            str.includes('registerDevSW') ||
-            str.includes('vite-pwa-plugin:dev-ready')
-          ) {
-            // Environment constraint: "HMR: Disabled. Ignore WebSocket errors."
+          if (shouldSuppress(str)) {
             return;
           }
           return origConsoleError.apply(console, arguments);
         };
 
+        var origConsoleWarn = console.warn;
+        console.warn = function () {
+          var str = '';
+          for (var i = 0; i < arguments.length; i++) {
+            var a = arguments[i];
+            if (typeof a === 'string') {
+              str += a + ' ';
+            } else if (a && typeof a === 'object') {
+              str += (a.message || '') + ' ' + (a.stack || '') + ' ' + String(a) + ' ';
+            }
+          }
+          if (shouldSuppress(str)) {
+            return;
+          }
+          return origConsoleWarn.apply(console, arguments);
+        };
+
+        window.onerror = function (msg, source, lineno, colno, error) {
+          var errStr = String(msg) + ' ' + (source || '') + ' ' + (error ? (error.message || error.stack || '') : '');
+          if (shouldSuppress(errStr)) {
+            return true;
+          }
+          return false;
+        };
+
+        window.addEventListener('error', function (e) {
+          var errStr = (e.message || '') + ' ' + (e.error ? (e.error.message || e.error.stack || '') : '');
+          if (shouldSuppress(errStr)) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            return true;
+          }
+        }, true);
+
+        window.addEventListener('unhandledrejection', function (e) {
+          var reason = e.reason;
+          var msg = reason ? (reason.message || reason.stack || String(reason)) : '';
+          if (shouldSuppress(msg)) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            return true;
+          }
+        }, true);
+
         if ('serviceWorker' in navigator) {
           navigator.serviceWorker.getRegistrations().then(function (registrations) {
             for (var i = 0; i < registrations.length; i++) {
-              if (registrations[i].active && registrations[i].active.scriptURL.includes('dev-sw')) {
-                registrations[i].unregister();
-              }
+              registrations[i].unregister();
             }
           }).catch(function () {});
         }
       })();
-      window.addEventListener('error', function (e) {
-        if (
-          e.message &&
-          (e.message.includes("reading 'send'") ||
-            e.message.includes('WebSocket') ||
-            e.message.includes('[vite]'))
-        ) {
-          e.stopImmediatePropagation();
-          e.preventDefault();
-        }
-      }, true);
-      window.addEventListener('unhandledrejection', function (e) {
-        var msg = e.reason ? (e.reason.message || String(e.reason)) : '';
-        if (
-          msg.includes("reading 'send'") ||
-          msg.includes('WebSocket') ||
-          msg.includes('[vite]')
-        ) {
-          e.stopImmediatePropagation();
-          e.preventDefault();
-        }
-      }, true);
     </script>
   </head>
   <body>

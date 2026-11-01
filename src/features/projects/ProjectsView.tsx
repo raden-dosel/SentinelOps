@@ -52,6 +52,7 @@ import {
   ChevronRight,
   ImageOff,
   X,
+  FileDown,
 } from 'lucide-react';
 import { useConnectivity, OFFLINE_WARNING, API_UNREACHABLE_WARNING } from '../../hooks/useConnectivity';
 import {
@@ -67,6 +68,10 @@ import {
   requestPresignedDownloadUrl,
   R2UploadItem,
 } from '../../services/r2UploadService';
+import {
+  downloadProjectMetadataJson,
+  buildProjectDetailsSnapshot,
+} from '../../services/portfolioExportService';
 
 interface ProjectsViewProps {
   initialClientId?: string;
@@ -494,6 +499,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
       try {
         setIsUploading(true);
         for (const it of itemsToUpload) {
+          const client = clients.find((c) => c.id === selectedProject.clientId);
           const attRecord: AttachmentRecord = {
             id: it.id || Math.random().toString(36).substring(2, 9),
             entityType: 'Project',
@@ -505,6 +511,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
             uploadedAt: new Date().toISOString(),
             sequenceNumber: it.sequenceNumber,
             storageProvider: 'local',
+            projectMetadataSnapshot: buildProjectDetailsSnapshot(selectedProject, client),
             blob: it.file,
           };
           await attachmentRepository.saveAttachment(attRecord);
@@ -547,6 +554,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   const handleSaveFailedItemLocally = async (item: R2UploadItem) => {
     if (!selectedProject) return;
     try {
+      const client = clients.find((c) => c.id === selectedProject.clientId);
       const attRecord: AttachmentRecord = {
         id: item.id || Math.random().toString(36).substring(2, 9),
         entityType: 'Project',
@@ -558,6 +566,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
         uploadedAt: new Date().toISOString(),
         sequenceNumber: item.sequenceNumber,
         storageProvider: 'local',
+        projectMetadataSnapshot: buildProjectDetailsSnapshot(selectedProject, client),
         blob: item.file,
       };
 
@@ -567,6 +576,23 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
       await loadProjectAttachments(selectedProject.id);
     } catch {
       showToast('Failed to save photo locally', 'error');
+    }
+  };
+
+  const handleExportProjectMetadata = () => {
+    if (!selectedProject) return;
+    try {
+      const client = clients.find((c) => c.id === selectedProject.clientId);
+      downloadProjectMetadataJson(selectedProject, projectAttachments, client);
+      showToast(
+        `Exported metadata for ${selectedProject.projectNumber} with ${projectAttachments.length} image reference(s)`,
+        'success'
+      );
+    } catch (err: unknown) {
+      showToast(
+        err instanceof Error ? err.message : 'Failed to export project metadata',
+        'error'
+      );
     }
   };
 
@@ -728,6 +754,15 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
 
               <div className="flex items-center gap-2">
                 <button
+                  type="button"
+                  onClick={handleExportProjectMetadata}
+                  className="px-3 py-1.5 rounded-xl border border-blue-500/40 bg-blue-500/10 hover:bg-blue-500/20 text-xs font-semibold text-blue-300 hover:text-blue-200 flex items-center gap-1.5 transition shadow-sm"
+                  title="Export complete Project Details & Image references as structured JSON for Portfolio classification"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Export JSON</span>
+                </button>
+                <button
                   onClick={() => {
                     setEditingProject({ ...selectedProject });
                     setSelectedClientId(selectedProject.clientId);
@@ -873,6 +908,17 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                       className="hidden"
                     />
                   </label>
+
+                  {/* Export Portfolio Metadata JSON Button */}
+                  <button
+                    type="button"
+                    onClick={handleExportProjectMetadata}
+                    className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold shadow-sm transition"
+                    title="Export complete Project Details & Image references as structured JSON"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Export JSON</span>
+                  </button>
                 </div>
               </div>
 
@@ -1137,13 +1183,30 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                                   </div>
                                 )}
                               </div>
-                              <button
-                                onClick={() => handleDeleteAttachment(att.id)}
-                                className="text-rose-400 hover:text-rose-300 p-1 shrink-0"
-                                title="Delete"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </button>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const client = clients.find((c) => c.id === selectedProject?.clientId);
+                                    if (selectedProject) {
+                                      downloadProjectMetadataJson(selectedProject, [att], client);
+                                      showToast(`Exported metadata for image #${att.sequenceNumber || 1}`, 'success');
+                                    }
+                                  }}
+                                  className="text-blue-400 hover:text-blue-300 p-1 shrink-0"
+                                  title="Export this photo's project metadata JSON"
+                                >
+                                  <FileDown className="w-3 h-3" />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteAttachment(att.id)}
+                                  className="text-rose-400 hover:text-rose-300 p-1 shrink-0"
+                                  title="Delete"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );
