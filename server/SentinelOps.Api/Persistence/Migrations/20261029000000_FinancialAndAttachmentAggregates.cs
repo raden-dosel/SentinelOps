@@ -154,6 +154,11 @@ namespace SentinelOps.Api.Persistence.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
+                name: "IX_Payments_InvoiceId",
+                table: "Payments",
+                column: "InvoiceId");
+
+            migrationBuilder.CreateIndex(
                 name: "IX_ServerAuditEvents_BusinessId_TimestampUtc",
                 table: "ServerAuditEvents",
                 columns: new[] { "BusinessId", "TimestampUtc" });

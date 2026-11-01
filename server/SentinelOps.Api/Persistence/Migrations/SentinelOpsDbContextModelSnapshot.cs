@@ -264,6 +264,8 @@ namespace SentinelOps.Api.Persistence.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("InvoiceId");
+
                     b.HasIndex("BusinessId", "InvoiceId");
 
                     b.HasIndex("BusinessId", "PaymentNumber")

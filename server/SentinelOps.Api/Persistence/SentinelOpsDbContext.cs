@@ -117,6 +117,7 @@ public sealed class SentinelOpsDbContext(DbContextOptions<SentinelOpsDbContext> 
             entity.Property(x => x.CreatedAtUtc).HasColumnType("timestamp with time zone");
             entity.HasIndex(x => new { x.BusinessId, x.PaymentNumber }).IsUnique();
             entity.HasIndex(x => new { x.BusinessId, x.InvoiceId });
+            entity.HasIndex(x => x.InvoiceId);
             entity.HasOne(x => x.Invoice).WithMany(x => x.Payments).HasForeignKey(x => x.InvoiceId).OnDelete(DeleteBehavior.Restrict);
         });
 
