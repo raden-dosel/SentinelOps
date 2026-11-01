@@ -62,6 +62,7 @@ export interface SnapshotResponse {
   }>;
   snapshotCursor: string;
   hasMore: boolean;
+  continuationToken?: string | null;
 }
 
 class SyncCoordinator {
@@ -479,20 +480,56 @@ class SyncCoordinator {
    * Pulls authoritative server snapshot when a cursor expires past retention,
    * while PRESERVING local pending outbox edits!
    */
-  public async recoverFromSnapshot(config: SyncConfig): Promise<void> {
-    const response = await fetch(`${config.apiBaseUrl}/api/v1/sync/snapshot`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${config.deviceToken}`,
-        'X-Device-Id': config.deviceId,
-      },
-    });
+   public async recoverFromSnapshot(config: SyncConfig): Promise<void> {
+    const allEntities: Array<{ entityType: string; entityId: string; revision: string; payload: any }> = [];
+    let snapshotCursor = '';
+    let continuation: string | null = null;
+    let hasMore = true;
+    let pagesFetched = 0;
+    const maxPages = 50; // Guard against infinite pagination loops (up to 25,000 entities)
+    const seenContinuations = new Set<string>();
 
-    if (!response.ok) {
-      throw new Error(`Failed to download full server snapshot (${response.status})`);
+    while (hasMore && pagesFetched < maxPages) {
+      const url = new URL(`${config.apiBaseUrl}/api/v1/sync/snapshot`);
+      url.searchParams.set('limit', '500');
+      if (continuation) {
+        url.searchParams.set('continuation', continuation);
+      }
+
+      const response = await fetch(url.toString(), {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${config.deviceToken}`,
+          'X-Device-Id': config.deviceId,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to download full server snapshot page ${pagesFetched + 1} (${response.status})`);
+      }
+
+      const snapshot = (await response.json()) as SnapshotResponse;
+      if (snapshot.entities && Array.isArray(snapshot.entities)) {
+        allEntities.push(...snapshot.entities);
+      }
+      snapshotCursor = snapshot.snapshotCursor || snapshotCursor;
+      hasMore = Boolean(snapshot.hasMore && snapshot.continuationToken);
+
+      if (hasMore && snapshot.continuationToken) {
+        if (seenContinuations.has(snapshot.continuationToken)) {
+          console.warn('[SyncCoordinator] Loop detected in snapshot pagination continuation token.');
+          break;
+        }
+        seenContinuations.add(snapshot.continuationToken);
+        continuation = snapshot.continuationToken;
+      } else {
+        continuation = null;
+        hasMore = false;
+      }
+
+      pagesFetched++;
     }
 
-    const snapshot = (await response.json()) as SnapshotResponse;
     const db = await getDatabase();
 
     // Preserve local outbox items
@@ -505,13 +542,15 @@ class SyncCoordinator {
       'invoices',
       'payments',
       'projects',
+      'attachments',
+      'settings',
       'syncMetadata',
     ];
 
     const tx = db.transaction(targetStores, 'readwrite');
 
     // Apply snapshot entities
-    for (const item of snapshot.entities || []) {
+    for (const item of allEntities) {
       const storeName = this.mapEntityTypeToStoreName(item.entityType);
       if (storeName && db.objectStoreNames.contains(storeName)) {
         const payload = { ...item.payload, id: item.entityId };
@@ -522,7 +561,7 @@ class SyncCoordinator {
     // Set cursor to snapshot cursor
     const meta: SyncMetadata = {
       id: 'cursor',
-      cursor: snapshot.snapshotCursor,
+      cursor: snapshotCursor,
       lastSuccessfulSyncAt: new Date().toISOString(),
       resyncRequired: false,
     };

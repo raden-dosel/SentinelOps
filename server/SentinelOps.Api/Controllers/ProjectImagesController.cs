@@ -169,7 +169,42 @@ public sealed class ProjectImagesController(SentinelOpsDbContext db, IConfigurat
     }
 
     /// <summary>
-    /// Finalizes an uploaded R2 object: validates object scope and security bounds.
+    /// Lists all completed attachments for a project within the authorized business.
+    /// </summary>
+    [HttpGet]
+    public async Task<ActionResult<IReadOnlyList<ProjectAttachmentSummaryDto>>> List(
+        string projectId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(projectId))
+            return Problem(statusCode: 400, title: "Project ID is required.");
+
+        var identity = await AuthenticateAsync(cancellationToken);
+        if (identity is null)
+            return Unauthorized();
+
+        var cleanProjectId = CleanPathSegment(projectId);
+        var attachments = await db.ProjectAttachments.AsNoTracking()
+            .Where(x => x.BusinessId == identity.Value.BusinessId &&
+                        x.ProjectId == cleanProjectId &&
+                        x.Status == "completed")
+            .OrderBy(x => x.UploadedAtUtc)
+            .Select(x => new ProjectAttachmentSummaryDto(
+                x.Id,
+                x.ProjectId,
+                x.ObjectKey,
+                x.FileName,
+                x.FileType,
+                x.FileSize,
+                x.Status,
+                x.UploadedAtUtc))
+            .ToListAsync(cancellationToken);
+
+        return Ok(attachments);
+    }
+
+    /// <summary>
+    /// Finalizes an uploaded R2 object: validates object scope, security bounds, and persists authoritative metadata.
     /// </summary>
     [HttpPost("complete")]
     public async Task<ActionResult<FinalizeUploadResponse>> FinalizeUpload(
@@ -219,17 +254,128 @@ public sealed class ProjectImagesController(SentinelOpsDbContext db, IConfigurat
                 detail: "Only JPEG, PNG, and WebP images are allowed.");
         }
 
+        var attachmentGuid = Guid.TryParse(request.AttachmentId, out var parsedGuid) ? parsedGuid : Guid.NewGuid();
+        var existing = await db.ProjectAttachments.SingleOrDefaultAsync(
+            x => x.BusinessId == identity.Value.BusinessId &&
+                 (x.Id == attachmentGuid || x.ObjectKey == request.ObjectKey),
+            cancellationToken);
+
+        if (existing is null)
+        {
+            var fileName = !string.IsNullOrWhiteSpace(request.DerivedFileName)
+                ? request.DerivedFileName
+                : Path.GetFileName(request.ObjectKey);
+
+            existing = new ProjectAttachment
+            {
+                Id = attachmentGuid,
+                BusinessId = identity.Value.BusinessId,
+                ProjectId = cleanProjectId,
+                ObjectKey = request.ObjectKey,
+                FileName = fileName,
+                FileType = mimeType,
+                FileSize = request.FileSize,
+                ETag = request.ETag,
+                ChecksumSha256 = request.ChecksumSha256,
+                Status = "completed",
+                UploadedAtUtc = DateTime.UtcNow
+            };
+            db.ProjectAttachments.Add(existing);
+        }
+        else
+        {
+            existing.Status = "completed";
+            existing.FileSize = request.FileSize;
+            existing.ETag = request.ETag ?? existing.ETag;
+            existing.ChecksumSha256 = request.ChecksumSha256 ?? existing.ChecksumSha256;
+        }
+
+        db.ServerAuditEvents.Add(new ServerAuditEvent
+        {
+            Id = Guid.NewGuid(),
+            BusinessId = identity.Value.BusinessId,
+            DeviceId = identity.Value.DeviceId,
+            Action = "ATTACHMENT_FINALIZED",
+            EntityType = "ProjectAttachment",
+            EntityId = existing.Id.ToString(),
+            DetailsJson = System.Text.Json.JsonSerializer.Serialize(new { projectId = cleanProjectId, objectKey = request.ObjectKey, fileSize = request.FileSize }),
+            TimestampUtc = DateTime.UtcNow
+        });
+
+        await db.SaveChangesAsync(cancellationToken);
+
         return Ok(new FinalizeUploadResponse(
             Status: "completed",
-            AttachmentId: request.AttachmentId,
+            AttachmentId: existing.Id.ToString(),
             ObjectKey: request.ObjectKey,
             ETag: request.ETag,
             FileSize: request.FileSize,
-            CompletedAtUtc: DateTime.UtcNow));
+            CompletedAtUtc: existing.UploadedAtUtc));
     }
 
     /// <summary>
-    /// Generates a short-lived presigned GET download URL for viewing private R2 images.
+    /// Soft deletes an attachment metadata record for this business and project.
+    /// </summary>
+    [HttpDelete("{attachmentId}")]
+    public async Task<IActionResult> DeleteAttachment(
+        string projectId,
+        string attachmentId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(attachmentId))
+            return Problem(statusCode: 400, title: "Project ID and Attachment ID are required.");
+
+        var identity = await AuthenticateAsync(cancellationToken);
+        if (identity is null)
+            return Unauthorized();
+
+        var cleanProjectId = CleanPathSegment(projectId);
+        var cleanAttachmentId = CleanPathSegment(attachmentId);
+
+        ProjectAttachment? attachment = null;
+        if (Guid.TryParse(cleanAttachmentId, out var parsedGuid))
+        {
+            attachment = await db.ProjectAttachments.SingleOrDefaultAsync(
+                x => x.BusinessId == identity.Value.BusinessId &&
+                     x.ProjectId == cleanProjectId &&
+                     x.Id == parsedGuid,
+                cancellationToken);
+        }
+
+        if (attachment is null)
+        {
+            attachment = await db.ProjectAttachments.SingleOrDefaultAsync(
+                x => x.BusinessId == identity.Value.BusinessId &&
+                     x.ProjectId == cleanProjectId &&
+                     x.ObjectKey.EndsWith(cleanAttachmentId),
+                cancellationToken);
+        }
+
+        if (attachment is null)
+            return NotFound();
+
+        attachment.Status = "deleted";
+        attachment.DeletedAtUtc = DateTime.UtcNow;
+
+        db.ServerAuditEvents.Add(new ServerAuditEvent
+        {
+            Id = Guid.NewGuid(),
+            BusinessId = identity.Value.BusinessId,
+            DeviceId = identity.Value.DeviceId,
+            Action = "ATTACHMENT_DELETED",
+            EntityType = "ProjectAttachment",
+            EntityId = attachment.Id.ToString(),
+            DetailsJson = System.Text.Json.JsonSerializer.Serialize(new { projectId = cleanProjectId, objectKey = attachment.ObjectKey }),
+            TimestampUtc = DateTime.UtcNow
+        });
+
+        await db.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Generates a short-lived presigned GET download URL for viewing private R2 images,
+    /// resolving through server-owned authoritative stored metadata.
     /// </summary>
     [HttpGet("{attachmentId}/download-url")]
     public async Task<ActionResult<DownloadUrlResponse>> GetPresignedDownloadUrl(
@@ -262,18 +408,56 @@ public sealed class ProjectImagesController(SentinelOpsDbContext db, IConfigurat
                 detail: "Cloudflare R2 credentials are not configured on this server.");
         }
 
-        var expectedPrefix = $"sentinelops/{identity.Value.BusinessId}/";
-        string objectKey;
+        var cleanProjectId = CleanPathSegment(projectId);
+        var cleanAttachmentId = CleanPathSegment(attachmentId);
 
-        if (!string.IsNullOrWhiteSpace(key) && key.StartsWith(expectedPrefix, StringComparison.Ordinal))
+        // Authoritative resolution: Find metadata stored for this business & project
+        ProjectAttachment? attachment = null;
+        if (Guid.TryParse(cleanAttachmentId, out var parsedAttachmentGuid))
         {
-            objectKey = key;
+            attachment = await db.ProjectAttachments.AsNoTracking().SingleOrDefaultAsync(
+                x => x.BusinessId == identity.Value.BusinessId &&
+                     x.ProjectId == cleanProjectId &&
+                     x.Id == parsedAttachmentGuid &&
+                     x.Status != "deleted",
+                cancellationToken);
+        }
+
+        if (attachment is null)
+        {
+            attachment = await db.ProjectAttachments.AsNoTracking().SingleOrDefaultAsync(
+                x => x.BusinessId == identity.Value.BusinessId &&
+                     x.ProjectId == cleanProjectId &&
+                     x.ObjectKey.EndsWith(cleanAttachmentId) &&
+                     x.Status != "deleted",
+                cancellationToken);
+        }
+
+        string objectKey;
+        if (attachment is not null)
+        {
+            objectKey = attachment.ObjectKey;
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                fileName = attachment.FileName;
+            }
         }
         else
         {
-            var cleanProjectId = CleanPathSegment(projectId);
-            var cleanAttachmentId = CleanPathSegment(attachmentId);
-            objectKey = $"sentinelops/{identity.Value.BusinessId}/projects/{cleanProjectId}/{cleanAttachmentId}";
+            var expectedPrefix = $"sentinelops/{identity.Value.BusinessId}/";
+            if (!string.IsNullOrWhiteSpace(key) && key.StartsWith(expectedPrefix, StringComparison.Ordinal))
+            {
+                objectKey = key;
+            }
+            else
+            {
+                return NotFound(new ProblemDetails
+                {
+                    Status = 404,
+                    Title = "Attachment metadata not found.",
+                    Detail = "No authorized completed attachment was found matching the requested identifier."
+                });
+            }
         }
 
         const long expiresInSeconds = 900; // 15 minutes

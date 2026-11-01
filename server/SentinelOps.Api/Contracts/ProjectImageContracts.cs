@@ -34,7 +34,8 @@ public sealed record FinalizeUploadRequest(
     long FileSize,
     int SequenceNumber,
     string? DerivedFileName = null,
-    string? ETag = null);
+    string? ETag = null,
+    string? ChecksumSha256 = null);
 
 public sealed record FinalizeUploadResponse(
     string Status,
@@ -49,6 +50,16 @@ public sealed record DownloadUrlResponse(
     string ObjectKey,
     long ExpiresInSeconds,
     string? DerivedFileName = null);
+
+public sealed record ProjectAttachmentSummaryDto(
+    Guid Id,
+    string ProjectId,
+    string ObjectKey,
+    string FileName,
+    string FileType,
+    long FileSize,
+    string Status,
+    DateTime UploadedAtUtc);
 
 // --- Cloudinary Backward Compatibility Contracts ---
 

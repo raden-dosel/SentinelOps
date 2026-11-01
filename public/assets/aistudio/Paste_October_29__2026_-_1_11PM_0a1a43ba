@@ -1,0 +1,474 @@
+# SentinelOps Audit Remediation — GitHub Copilot Agent Implementation Prompt
+
+## Target and Role
+
+**Target:** GitHub Copilot Agent Mode operating in the existing SentinelOps repository.
+
+Act as a **Principal Software Architect, Senior Full-Stack Engineer, ASP.NET Core/PostgreSQL Engineer, Offline-First Synchronization Specialist, Application Security Engineer, and QA/Release Engineer**.
+
+Your task is to remediate the findings in the **SentinelOps Application Audit dated 2026-10-29**. Work in the repository, make the necessary code and test changes, and verify the results. Do not merely restate the audit or provide a plan and stop.
+
+## Mission and Project Context
+
+SentinelOps is primarily an offline-first PWA using browser IndexedDB. A React/TypeScript frontend, an ASP.NET Core API, and PostgreSQL synchronization foundation already exist. The application supports local CRM, quotations/revisions, invoices, payments, projects, PDF generation, backups, local authentication, and an IndexedDB outbox.
+
+The audit's concern is that the shared-cloud layer is not yet production-ready for real financial data. Do not treat the existence of an API or PostgreSQL models as proof of complete cloud persistence or multi-device synchronization. Preserve local-first operation while improving server authority, security, synchronization, recoverability, and operational verification.
+
+The audit file is the current source of the findings and P0–P3 definitions. Locate and read the complete report in the repository before editing. Verify each finding against the latest code; do not assume audit paths or state remain unchanged.
+
+---
+
+## 1. Mandatory Initial Audit
+
+Before modifying any files:
+
+1. Inspect the current Git branch and working-tree changes. Preserve any pre-existing user changes.
+2. Locate and read the full SentinelOps audit, including the P0, P1, P2, P3, delivery-order, and release-gate sections.
+3. Inspect the relevant current source and tests, including where present:
+   - `server/SentinelOps.Api/Controllers/SyncController.cs`
+   - `server/SentinelOps.Api/Controllers/DeviceController.cs`
+   - `server/SentinelOps.Api/Controllers/ProjectImagesController.cs`
+   - `server/SentinelOps.Api/Program.cs`
+   - `server/SentinelOps.Api/Domain/Entities.cs`
+   - `server/SentinelOps.Api/Persistence/SentinelOpsDbContext.cs` and existing migrations
+   - `src/storage/database.ts`, `src/storage/repositories.ts`, `src/types/index.ts`
+   - `src/services/syncCoordinator.ts`, `src/services/backupService.ts`, `src/services/security.ts`
+   - `src/app/providers/AuthContext.tsx`
+   - `src/features/quotations/QuotationsView.tsx`, `src/features/billing/BillingView.tsx`
+   - existing R2/Cloudinary upload services and API controllers
+   - `.github/workflows/ci.yml`, README, architecture/readiness documents, and deployment/backup runbooks
+4. Confirm actual file paths, current data contracts, hosting configuration, and test coverage. Files may have changed since the audit.
+5. Run available baseline checks that do not modify or contact production systems.
+6. Map each audit finding to its root cause, affected files, dependencies, risk, tests, and acceptance criteria.
+
+Do not modify files during this initial audit. After it is complete, begin implementation; do not stop at the report or checklist.
+
+## 2. Non-Negotiable Safety and Change-Preservation Rules
+
+- Preserve existing user changes, prior updates, working local-first behavior, and valid API contracts wherever possible.
+- Make small, reviewable patches. Avoid broad refactors unrelated to the findings.
+- Do not reset the branch, discard changes, delete existing business records, or run destructive Git/database commands.
+- Do not apply migrations to production, import live customer data, clear IndexedDB, rotate live credentials, deploy services, or change cloud resources without explicit authorization.
+- You may create EF Core migrations and test them against a disposable local/test database. Never automatically apply them to live Neon.
+- Never print, log, commit, or include passwords, connection strings, API tokens, refresh tokens, object-storage secrets, signing keys, or customer payloads in reports or test output.
+- Do not use production secrets in ordinary tests. External Neon tests must be explicit opt-in and safeguarded against unintended production use.
+- Do not claim production readiness from a successful build alone.
+- Mark a release gate as passed only when the corresponding acceptance criteria have actually been verified.
+- If a change conflicts with an approved feature or requires a breaking contract, irreversible operation, or major architectural replacement, stop before that specific change, explain the conflict, and request permission. Continue independent safe work.
+- If the entire scope cannot be completed in one session, fully implement and verify the highest-priority safe slice and report the remaining blockers honestly.
+
+## 3. Priority Definitions and Required Work Order
+
+Use the audit's priority model:
+
+- **P0 — Critical:** data loss, unauthorized access, financial integrity, or production-readiness blocker.
+- **P1 — High:** required for dependable multi-device operation or a serious operational release.
+- **P2 — Medium:** maintainability, usability, observability, or scale improvements.
+- **P3 — Later:** product expansion after reliability foundations are complete.
+
+Work in dependency order:
+
+1. P0.3 — production secret handling and fail-closed configuration.
+2. P0.2 — server authentication, roles, authorization, and business isolation.
+3. P0.1 — server-authoritative financial aggregates and commands.
+4. P0.4 — deterministic, loss-aware resynchronization.
+5. P0.5 — safe backup and restore.
+6. P0.6 — authoritative attachment lifecycle.
+7. P1.1–P1.3 — conflict UI, safe offline numbering, and integration tests.
+8. P1.4–P1.6 — documentation, operational telemetry, and local security/recovery UX.
+9. P2 — targeted architecture, accessibility, financial edge cases, PWA/storage lifecycle.
+10. P3 — deferred product features only after required release gates are met.
+
+Do not build P3 features as a substitute for P0/P1 remediation.
+
+---
+
+## 4. P0.1 — Establish a Server-Authoritative Financial Model
+
+### Finding
+
+The API primarily stores allowlisted entities as generic JSON in `SyncEntities`. Selected payload validation does not provide authoritative relational aggregates and commands for invoices, payments, reversals, issued quotations, or document numbers.
+
+### Requirements
+
+1. Inspect current domain models, API contracts, validation, migrations, and synchronization behavior before designing schema changes.
+2. Introduce typed DTOs and server-side domain/application services for supported clients, quotations/revisions, invoices, payments/reversals, projects/progress notes, attachment metadata, appropriate business settings, and server audit events.
+3. Add justified relational tables/aggregates, foreign keys, tenant-scoped uniqueness constraints, and indexes.
+4. Preserve stable UUIDs and relationships among clients, quotations, invoices, payments, and projects.
+5. Model consequential operations as explicit commands: issue/revise quotation, issue/void invoice, record/reverse payment, and allocate final document numbers.
+6. Make commands idempotent. Replaying a command ID must not duplicate a payment, reversal, invoice, or issue event.
+7. Recompute or verify totals and balances server-side. Do not trust client-provided outstanding balances or financial totals as authoritative.
+8. Prevent in-place modification of issued invoices. Use controlled revision/void/correction rules consistent with the actual domain model.
+9. Enforce overpayment and reversal constraints under concurrent requests using appropriate database transactions/concurrency controls.
+10. Preserve existing generic JSON rows during transition. Build and test a compatibility/backfill path before considering table or payload removal.
+11. Keep UUIDs as canonical identity and do not silently renumber externally shared or issued documents to resolve offline collisions.
+
+### Acceptance tests
+
+- Concurrent payment operations cannot overpay an invoice.
+- Retrying an identical payment command does not create a duplicate.
+- Payment reversals are idempotent and bounded by the reversible amount.
+- Issued invoices cannot be mutated through a generic upsert.
+- Server calculations/validations enforce financial invariants.
+- Cross-business references are rejected.
+- Final numbering is unique within its business and document type.
+- Legacy generic JSON data remains readable during transition tests.
+
+## 5. P0.2 — Server Authentication, Roles, and Tenant Isolation
+
+### Requirements
+
+1. Keep local vault authentication distinct from server-side identity. Unlocking a tablet locally is not proof of server identity.
+2. Inspect the current authentication design and implement a suitable, documented server identity model without unnecessary complexity.
+3. Enforce backend roles appropriate to current operations (for example owner/admin, operations, finance, and read-only) for every protected action.
+4. Enforce business/tenant scoping in server queries and commands, never solely in frontend code or client-supplied IDs.
+5. Implement a safe access-token lifetime and renewal/revocation strategy compatible with the chosen identity model.
+6. Implement device token rotation, revocation, lost-device recovery, and audit events. Preserve unsent local outbox records on revocation so they can be exported/re-enrolled deliberately.
+7. Replace unrestricted shared-token onboarding with explicit, auditable enrollment/admin controls where feasible.
+8. Test invalid, expired, revoked, and cross-business credentials.
+
+### Acceptance tests
+
+- A device cannot read or change another business's records by manipulating IDs, cursors, query parameters, or payloads.
+- Each role is prevented from unauthorized operations at the API boundary.
+- Revoked/expired credentials are rejected.
+- Rotation and device recovery have tested paths.
+- Security errors reveal no protected payloads or secrets.
+- Administrative and relevant security events are recorded.
+
+Do not implement role-selection UI without enforcing the matching backend policy.
+
+## 6. P0.3 — Fail Closed on Production Secrets
+
+### Requirements
+
+1. Inspect secret/configuration resolution in `Program.cs`, sync/device controllers, hosting settings, and CI.
+2. In Production, refuse startup when required registration, signing, encryption, or authentication secrets are absent, blank, weak, or set to known development defaults.
+3. Remove production fallback signing keys or ephemeral credentials. Development-only fallback behavior must be explicit and restricted to Development.
+4. Do not generate a new signing key at each start; cursor/token behavior must survive normal restarts with configured keys.
+5. Specify and test rotation procedures, including an intentional overlap period if required.
+6. Review long-lived device tokens in browser storage. Minimize exposure and document browser-side security limitations honestly.
+7. Add structured redacted logging and tests proving secrets, tokens, token hashes, upload signatures, connection strings, and sensitive payloads do not appear in logs or error responses.
+8. Verify production CORS, TLS termination, forwarded headers, trusted proxies, and rate limiting.
+9. Safely fix the obsolete `KnownNetworks` API use after checking the actual target framework and proxy configuration.
+10. Remove or use `NormalizePostgresConnectionString` in `Program.cs` only after verifying the application's current configuration behavior.
+
+### Acceptance tests
+
+- Production startup fails with a clear non-secret error when required secrets are missing.
+- Development still works only with explicit development configuration.
+- Cursor signatures remain valid across restart using the same configured key.
+- Weak/default secrets are rejected in production.
+- Logs and ProblemDetails contain no secrets.
+- Forwarded headers trust only configured proxies/networks.
+
+## 7. P0.4 — Complete Loss-Aware Resynchronization
+
+### Requirements
+
+1. Define a versioned snapshot contract with a stable snapshot boundary/ID, deterministic ordering, signed continuation cursor, `hasMore`/next-cursor behavior, and business authorization.
+2. Make the client retrieve pages until completion. Detect invalid cursors and pagination loops.
+3. Explicitly reconcile records absent from a *complete* snapshot. Never remove local data based on a partial snapshot.
+4. Preserve pending local outbox writes and return conflict results when local and remote versions diverge.
+5. Include attachment metadata and define attachment reconciliation.
+6. Correct tombstone/change-feed sequence behavior and detect stale cursors/feed retention gaps.
+7. Apply a snapshot and cursor atomically, or use a staged snapshot-and-swap strategy when a single transaction is impractical.
+8. Ensure interrupted/retried recovery is safe and idempotent.
+9. Expose sync progress and error categories without logging sensitive data.
+
+### Acceptance tests
+
+- A dataset larger than one page is fully synchronized.
+- Stable paging does not omit or duplicate entities.
+- An expired cursor triggers the designed resync flow.
+- Pending offline edits survive snapshot recovery.
+- Remote deletion does not resurrect entities.
+- Partial/failed snapshots do not corrupt the current local dataset.
+- Attachment metadata is reconciled.
+- Replaying a recovery operation is safe.
+
+## 8. P0.5 — Recoverable Backup and Restore
+
+### Requirements
+
+1. Audit `backupService.ts` and the server/host backup implementation.
+2. Before destructive local restore, require a recoverable pre-restore backup or use an isolated staging/import-and-swap strategy.
+3. Validate backup format/version, record types, relationships, document numbering, monetary consistency, attachment metadata/checksums, and archive size before mutating data.
+4. Add checksum/signature validation where appropriate. Do not confuse checksums with encryption or proof of origin.
+5. Encrypt sensitive backups and document key ownership/recovery limitations.
+6. Make failed/interrupted restore recoverable using restore-to-new-database, stage-and-swap, or a storage-supported transaction/rollback strategy.
+7. Implement scheduled encrypted PostgreSQL backups, off-host storage, retention, least privilege, and success/failure alerting.
+8. Record RPO/RTO only when agreed and demonstrated, not as invented guarantees.
+9. Test restoration only in a disposable environment; never overwrite production for a drill.
+
+### Acceptance tests
+
+- Invalid/corrupt backups are rejected before existing records change.
+- An interrupted restore leaves original data recoverable.
+- A backup restores to a clean test environment.
+- Counts, relationships, financial totals, and attachment checksums reconcile.
+- Failed backups generate actionable alerts.
+- Restore results and actual elapsed recovery time are recorded.
+
+## 9. P0.6 — Authoritative Attachment Lifecycle
+
+### Finding
+
+R2 and Cloudinary paths coexist. The current finalization path does not reliably persist authoritative attachment metadata or validate the stored object; downloads rely too much on client-provided keys.
+
+### Requirements
+
+1. Inspect both provider implementations, controllers, runtime configuration, and current callers.
+2. Select one primary provider/lifecycle for the current release. If removing a provider would break an approved integration or existing data, stop for permission before removal. Do not preserve competing paths without an explicit reason.
+3. Persist server-owned attachment metadata: stable ID, business ID, project ID, provider/object ID, type, length, checksum, status, timestamps, and relevant ownership information.
+4. Authorize all create/finalize/list/download/delete operations against the authenticated business and project.
+5. Resolve downloads through server-owned metadata, not just a client-provided object key. Use short-lived signed URLs or authenticated streaming as appropriate.
+6. Verify object existence and provider-reported size/checksum/type before marking an upload complete.
+7. Enforce limits for size, file type, count, quota, and upload rate; validate file signatures where practical.
+8. Keep storage private by default, with restrictive actual-origin CORS.
+9. Add retry/resume where supported, checksum verification, idempotent finalization, and orphan cleanup.
+10. Preserve offline support: queue local blobs when offline and display local-only/queued/uploading/uploaded/failed status accurately.
+11. Do not report a photo as available on another device until its bytes can be retrieved there.
+
+### Acceptance tests
+
+- Cross-business upload/download is denied.
+- Missing objects cannot be finalized.
+- Invalid/oversized files are rejected.
+- Repeated finalization does not duplicate records.
+- Interrupted upload retries safely.
+- Downloads resolve through authorized stored metadata.
+- Local-only attachments upload after reconnect.
+- Orphaned objects and metadata are detectable and safely cleaned up.
+
+## 10. P1.1 — Conflict Center and Failed Operation Handling
+
+### Requirements
+
+- Build a UI for existing `syncConflicts`: entity, reason, local/server versions, relevant field differences, timestamp, and allowed actions.
+- Offer keep-local, accept-server, merge, retry, discard, or export only when safe for that entity type.
+- Never offer a generic overwrite for payments, reversals, issued invoices, issued quotations, final document numbers, or append-only facts.
+- Add bounded exponential backoff with jitter, maximum attempts, visible state, and a dead-letter/needs-attention status.
+- Never silently drop unsent financial operations after retry exhaustion.
+- Show last push/pull, pending/failed counts, last error category, and network/API status.
+- Keep events such as payment/reversal, issue, revision, delete, and attachment lifecycle distinct and properly ordered.
+
+### Acceptance tests
+
+- A permitted conflict can be resolved via UI and synchronized.
+- Financial facts cannot be overridden by unsafe last-write-wins.
+- Permanently failing items remain visible and recoverable.
+- Retry is bounded/idempotent.
+- Sync state remains correct after reload and offline restart.
+
+## 11. P1.2 — Safe Offline Document Numbering
+
+### Requirements
+
+- Inspect the current numbering logic before modification.
+- Keep UUIDs as canonical internal IDs.
+- Define distinct offline draft identifiers and server-assigned final numbers.
+- Allocate final numbers on the authoritative server with tenant/document-type uniqueness and transaction-safe allocation.
+- Never silently renumber a document already shared or issued.
+- Add a visible, audited reconciliation flow for existing draft collisions.
+- Continue to allow offline draft creation without a server connection.
+
+### Acceptance tests
+
+- Two devices can independently draft offline without identity collision.
+- Concurrent issuance yields unique final numbers.
+- Retried issuance does not duplicate documents.
+- Issued documents are never silently renumbered.
+- Reconciliation is visible and auditable.
+
+## 12. P1.3 — Meaningful Integration Test Coverage
+
+Add repeatable CI tests that do not require production secrets for:
+
+- Fresh and upgrade PostgreSQL migrations.
+- Real HTTP API push/pull.
+- Tenant isolation and authorization failures.
+- Idempotency and duplicate retry handling.
+- Concurrent payments and document issuance.
+- Cursor signing, pagination, tombstones, stale-cursor recovery.
+- Device revocation/expiry.
+- Attachment completion, auth, retrieval, checksum, and cleanup.
+- Backup restore and reconciliation.
+- Two independent browser contexts with separate IndexedDB databases.
+- Offline mutation, reconnect, retry, conflict, and resync.
+
+Prefer disposable PostgreSQL in CI and Playwright or equivalent for browser end-to-end tests. Neon tests must be opt-in and protected against accidental production use. Document any remaining manual staging tests.
+
+## 13. P1.4 — Make Documentation Match Actual Readiness
+
+1. Review README, architecture, readiness audit, deployment runbook, backup, and PWA/storage docs.
+2. Remove unsupported claims such as “enterprise-grade,” “complete synchronization,” or “production-ready” unless demonstrated by tests.
+3. Resolve schema/version mismatches (for example documentation saying IndexedDB version 1 while code is version 4) based on the actual current code.
+4. Maintain a single readiness matrix with statuses:
+   - Local-only
+   - Implemented, not integration-tested
+   - Verified in disposable/staging
+   - Production-ready for defined use
+   - Blocked/not implemented
+5. Document environment variable names/purposes, never their secret values.
+6. Document migration, runtime configuration, health checks, backup/restore, and device-enrollment procedures.
+7. Update documentation only after capability changes are implemented and verified.
+
+### Acceptance tests
+
+A new operator can tell which workflows are safe for one offline tablet, multiple staging devices, or defined production use. Documentation matches code and test evidence.
+
+## 14. P1.5 — Operational Resilience and Observability
+
+Implement where supported by the current architecture:
+
+- Correlation IDs and redacted structured logs.
+- Push/pull results, sync lag, pending operation counts, conflict/retry/dead-letter counts, and resync progress metrics.
+- Separate API liveness and database readiness monitoring.
+- Database connection/pool exhaustion diagnostics.
+- Backup age/success/failure monitoring and restore-drill status.
+- Storage/quota and attachment usage warnings.
+- Retention jobs for change feed and tombstones that preserve resync correctness.
+- Actionable alerts, response procedures, and operational ownership.
+- Privacy-aware telemetry that excludes tokens, connection strings, and unnecessary customer data.
+
+### Acceptance tests
+
+Simulated API outage, stalled outbox, DB failure, expired credentials, failed backup, and storage-quota problems are visible and actionable without leaking sensitive information.
+
+## 15. P1.6 — Local Security and Recovery UX
+
+- Review PBKDF2 parameters, password policy, local attempt throttling, and rehash-on-login/parameter-upgrade path.
+- Identify exactly which local data is encrypted with AES-GCM; do not claim all IndexedDB is encrypted unless it is.
+- Minimize device-token exposure and support rotation/revocation.
+- Provide an auditable recovery/device-recovery flow; do not rely solely on an easily guessed security question.
+- Warn users about browser/site-data clearing and backups before device reset/logout/destructive actions.
+- Explain the difference between local session lock, server identity, and remote device revocation.
+
+### Acceptance tests
+
+- Invalid login attempts are throttled.
+- Supported password-hash upgrades are safe.
+- Recovery behavior is tested/auditable.
+- Encryption scope and limitations are documented accurately.
+- Users can see pending sync and backup status before destructive data actions.
+
+## 16. P2 — Targeted Architecture, UX, Financial, and PWA Improvements
+
+After P0/P1 foundations are stable, implement appropriate targeted improvements:
+
+### Architecture and typing
+- Replace generic `any` sync/attachment payloads with versioned DTOs and runtime validation.
+- Centralize API transport, auth headers, ProblemDetails parsing, timeouts, cancellation, and retry policy.
+- Extract domain commands from large UI views where this clearly improves testability.
+- Add explicit domain and backup schema migrations/up-converters.
+- Add justified tenant-scoped uniqueness and relationship constraints.
+
+### Accessibility and tablet UX
+- Improve keyboard navigation and dialog focus management.
+- Validate field labels, error associations, contrast, screen-reader announcements, and touch targets.
+- Standardize loading/empty/retry/offline/conflict/permission-denied states.
+- Preserve filters/selection on refresh where useful.
+- Add bulk actions, saved filters, sorting, and exports only where they answer actual business needs.
+
+### Financial and document correctness
+- Test due/issue dates and Philippine timezone behavior.
+- Validate negative, non-finite, extreme, and fractional quantities/prices against defined rules.
+- Make invoice status transitions explicit and protect issued documents locally and remotely.
+- Add immutable receipt numbering, reversal/cancellation behavior, and reconciliation reports.
+- Add currencies/tax settings only when supported by a defined business/legal model.
+
+### PWA/storage lifecycle
+- Warn about local quota and add safe attachment cleanup.
+- Show pending sync/backup before site data is cleared.
+- Test service-worker updates and stale-asset recovery.
+- Add image thumbnail/orientation handling and visible offline upload queues when appropriate.
+- Define behavior for multiple browser tabs updating the same IndexedDB records.
+
+Do not begin P3 feature work while required P0/P1 gates remain open.
+
+## 17. P3 — Defer Product Expansion
+
+Defer these until reliability gates pass:
+
+- Staff/approval enhancements beyond the security foundation.
+- Site survey and crew scheduling.
+- Inventory, procurement, serial tracking, suppliers, and subcontractors.
+- Customer communications and recurring reminders.
+- Maintenance contracts, SLAs, warranties, and renewals.
+- Camera annotations, signatures, and geotagging after privacy review.
+- Customer portal.
+- Conversion, project margin, receivables aging, technician utilization, and lead-source analytics.
+- Multi-language and expanded regional tax/document templates.
+
+## 18. Build, Test, and Code Quality Requirements
+
+Use the repository's actual package manager and scripts. Do not assume npm if the project uses Bun or assume local SDKs are available.
+
+Run appropriate available checks:
+
+- Frontend lint/type-check, unit tests, and production build.
+- API build and non-production unit tests.
+- PostgreSQL integration tests against a disposable database.
+- Browser E2E tests for critical sync workflows.
+- Fresh/upgrade EF migration tests.
+- Backup restore and attachment integration tests as implemented.
+
+The audit's baseline claims were: frontend 12 test files/84 tests passed, lint/build passed, non-Neon .NET suite 8 tests passed, bundle size 1.56 MB before gzip with a Vite chunk warning, and API build warnings for obsolete `KnownNetworks` use and unused `NormalizePostgresConnectionString`. Neon integration, HTTP integration, two-device workflows, attachment lifecycle, and restore were unverified. Treat these as historical baseline claims—not current results—and rerun available checks.
+
+Do not split bundles indiscriminately just to suppress a warning. Inspect actual bundle contents and apply targeted lazy loading where it improves tablet startup. Fix obsolete APIs safely and remove/use the unused helper only after confirming configuration behavior.
+
+If tools are unavailable, use an authorized browser/cloud environment where available and document what was not executed. Never state a command passed unless it was actually run and inspected.
+
+## 19. Remediation Tracking and Release Gates
+
+Create or update a status document, for example `docs/audits/sentinelops-audit-remediation-status.md`, that maps each finding to priority, root cause, files, implementation state, test evidence, remaining risks, dependencies, and gate status.
+
+Use statuses: **Not Started**, **In Progress**, **Implemented / Not Verified**, **Verified**, **Blocked**, and **Deferred**.
+
+Use Markdown strikethrough on a release gate only after its complete acceptance test passes. Do not cross out a gate because code exists or a unit test passed when the gate requires end-to-end, recovery, or restore evidence.
+
+### Required release gates
+
+- [ ] Fresh and upgrade PostgreSQL migrations pass in a disposable environment.
+- [ ] Production secrets fail closed, and cursor continuity survives a service restart.
+- [ ] Tenant isolation, role authorization, expired-device, and revoked-device tests pass.
+- [ ] Two independent devices synchronize clients, quotations, projects, invoices, payments, deletions, and conflicts.
+- [ ] Concurrent payments and idempotent retries preserve financial invariants.
+- [ ] Expired-cursor recovery handles multi-page snapshots and preserves pending local writes.
+- [ ] Attachment authorization, completion, download, checksum, and orphan cleanup are verified.
+- [ ] Encrypted backup restoration is witnessed and meets an agreed RPO/RTO.
+- [ ] Initial local-to-cloud import dry run reconciles IDs, relationships, counts, totals, and attachments without mutating source tablets.
+- [ ] Frontend/API tests, lint, and production build pass in CI.
+- [ ] Documentation distinguishes local-only, staging-verified, and production-ready behavior.
+
+Do not describe SentinelOps as production-ready for shared business data while any critical gate remains unverified or blocked. Report a precise readiness level: local-only beta, controlled staging, limited production pilot, or not ready for real business data.
+
+## 20. Final Execution Instructions
+
+1. Audit the latest repository and establish the baseline.
+2. Begin with P0.3, then P0.2 and P0.1; follow dependency order for the rest.
+3. Work in small, reviewable slices. Test each slice before proceeding.
+4. Add/update tests alongside each implementation.
+5. Never apply production migrations or import real customer data without explicit authorization.
+6. Preserve local-first behavior and existing work.
+7. Update docs/status tracking only as implementation and verification change.
+8. Continue until safely implementable P0/P1 items are resolved or a genuine blocker requires permission, external credentials, provisioning, or a business decision.
+9. Report incomplete work as incomplete; do not replace implementation with a future-work plan.
+
+## Required Final Report
+
+1. **Executive summary:** readiness verdict and key outcomes.
+2. **Findings resolved:** ID, priority, root cause, fix, test evidence.
+3. **Files changed:** path and purpose.
+4. **Database changes:** migrations created and test environment used; explicitly state whether production was untouched.
+5. **Security changes:** identity, authorization, tenant isolation, secrets, attachment access, credential lifecycle.
+6. **Sync verification:** push/pull, retries, conflicts, resync, deletes, attachments.
+7. **Test results:** exact commands and actual pass/fail results.
+8. **Release-gate matrix:** strike through only fully verified gates.
+9. **Remaining blockers/risks:** exact next action and dependency.
+10. **Deployment recommendation:** local-only beta, controlled staging, limited production pilot, or not ready for real business data.
+
+## Final Directive
+
+**Remediate the actual audit findings in code and tests. Prioritize financial integrity, server authorization, loss-aware synchronization, recoverable backups, and safe attachment handling before product expansion. Preserve SentinelOps's offline-first workflow. Do not equate the existence of an API with a complete cloud system, and support every readiness claim with verifiable evidence.**

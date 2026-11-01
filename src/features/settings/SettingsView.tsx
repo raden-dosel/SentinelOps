@@ -43,6 +43,11 @@ import {
   AlertTriangle,
   RefreshCw,
   KeyRound,
+  Key,
+  Copy,
+  Printer,
+  HelpCircle,
+  Shield,
   Cloud,
   CloudOff,
   Smartphone,
@@ -53,7 +58,7 @@ import {
 } from 'lucide-react';
 
 export const SettingsView: React.FC = () => {
-  const { session, logout } = useAuth();
+  const { session, logout, changePassword, generateNewRecoveryCodes, updateSecurityQuestion } = useAuth();
   const { showToast } = useToast();
 
   const [activeSection, setActiveSection] = useState<
@@ -93,6 +98,24 @@ export const SettingsView: React.FC = () => {
   const [passwordChangeError, setPasswordChangeError] = useState('');
   const [passwordChangeSuccess, setPasswordChangeSuccess] = useState('');
 
+  // Emergency Recovery Codes State
+  const [remainingCodesCount, setRemainingCodesCount] = useState<number>(0);
+  const [totalCodesCount, setTotalCodesCount] = useState<number>(0);
+  const [currentSecurityQuestion, setCurrentSecurityQuestion] = useState<string>('');
+  const [isGenCodesModalOpen, setIsGenCodesModalOpen] = useState(false);
+  const [genCodesPassword, setGenCodesPassword] = useState('');
+  const [genCodesError, setGenCodesError] = useState('');
+  const [generatedCodesList, setGeneratedCodesList] = useState<string[] | null>(null);
+  const [copiedCodes, setCopiedCodes] = useState(false);
+
+  // Security Question Modal State
+  const [isQuestionModalOpen, setIsQuestionModalOpen] = useState(false);
+  const [questionAuthPassword, setQuestionAuthPassword] = useState('');
+  const [newQuestionInput, setNewQuestionInput] = useState('');
+  const [newAnswerInput, setNewAnswerInput] = useState('');
+  const [questionUpdateError, setQuestionUpdateError] = useState('');
+  const [questionUpdateSuccess, setQuestionUpdateSuccess] = useState('');
+
   // Backup restore & dry run state
   const [restoreFile, setRestoreFile] = useState<File | null>(null);
   const [restorePreview, setRestorePreview] = useState<RestorePreview | null>(null);
@@ -127,6 +150,14 @@ export const SettingsView: React.FC = () => {
       setConflicts(confl || []);
       if (effectiveSettings.businessName && !cfg) {
         setEnrollBusinessName(effectiveSettings.businessName);
+      }
+
+      const currUser = await userRepository.getUserByUsername(session?.username || 'admin').catch(() => null);
+      if (currUser) {
+        const unused = (currUser.recoveryCodes || []).filter((c) => !c.usedAt).length;
+        setRemainingCodesCount(unused);
+        setTotalCodesCount(currUser.recoveryCodes?.length || 0);
+        setCurrentSecurityQuestion(currUser.securityQuestion || '');
       }
     } catch (e) {
       console.error('Settings loadAll error:', e);
@@ -243,8 +274,12 @@ export const SettingsView: React.FC = () => {
     setPasswordChangeError('');
     setPasswordChangeSuccess('');
 
-    if (newPassword.length < 6) {
-      setPasswordChangeError('New password must be at least 6 characters.');
+    if (!currentPassword) {
+      setPasswordChangeError('Current master password is required.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPasswordChangeError('New password must be at least 8 characters long.');
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -253,22 +288,118 @@ export const SettingsView: React.FC = () => {
     }
 
     try {
-      const user = await userRepository.getUserByUsername(session?.username || 'admin');
-      if (!user) throw new Error('User not found');
+      const res = await changePassword(currentPassword, newPassword);
+      if (!res.success) {
+        setPasswordChangeError(res.error || 'Failed to change password.');
+        return;
+      }
 
-      const salt = generateSalt(16);
-      const newHash = await hashPassword(newPassword, salt);
-      user.passwordHash = `${salt}:${newHash}`;
-      user.salt = salt;
-      await userRepository.saveUser(user);
-
-      setPasswordChangeSuccess('Master password changed successfully!');
+      setPasswordChangeSuccess('Master password changed successfully! Active sessions invalidated.');
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
       showToast('Master password updated', 'success');
+      await loadAll();
     } catch (err: unknown) {
       setPasswordChangeError(err instanceof Error ? err.message : 'Password change failed.');
+    }
+  };
+
+  const handleGenerateCodesSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setGenCodesError('');
+
+    if (!genCodesPassword) {
+      setGenCodesError('Current master password is required.');
+      return;
+    }
+
+    try {
+      const res = await generateNewRecoveryCodes(genCodesPassword);
+      if (!res.success || !res.codes) {
+        setGenCodesError(res.error || 'Failed to generate recovery codes.');
+        return;
+      }
+
+      setGeneratedCodesList(res.codes);
+      setGenCodesPassword('');
+      showToast('8 new emergency recovery codes generated!', 'success');
+      await loadAll();
+    } catch (err: unknown) {
+      setGenCodesError(err instanceof Error ? err.message : 'Failed to generate codes.');
+    }
+  };
+
+  const handleCopyCodes = async () => {
+    if (!generatedCodesList) return;
+    const text = [
+      'SENTINELOPS EMERGENCY RECOVERY CODES',
+      'Generated: ' + new Date().toISOString(),
+      'User: ' + (session?.username || 'admin'),
+      '',
+      'Keep these codes offline in a safe place. Each code can be used only once.',
+      '',
+      ...generatedCodesList.map((c, i) => `${i + 1}. ${c}`),
+    ].join('\n');
+    await navigator.clipboard.writeText(text);
+    setCopiedCodes(true);
+    setTimeout(() => setCopiedCodes(false), 2000);
+  };
+
+  const handleDownloadCodesTxt = () => {
+    if (!generatedCodesList) return;
+    const text = [
+      'SENTINELOPS EMERGENCY RECOVERY CODES',
+      'Generated: ' + new Date().toISOString(),
+      'User: ' + (session?.username || 'admin'),
+      '',
+      'Keep these codes offline in a safe place. Each code can be used only once.',
+      '',
+      ...generatedCodesList.map((c, i) => `${i + 1}. ${c}`),
+    ].join('\n');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sentinelops-recovery-codes-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePrintCodes = () => {
+    window.print();
+  };
+
+  const handleUpdateQuestionSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setQuestionUpdateError('');
+    setQuestionUpdateSuccess('');
+
+    if (!questionAuthPassword) {
+      setQuestionUpdateError('Current master password is required.');
+      return;
+    }
+    if (!newQuestionInput.trim() || !newAnswerInput.trim()) {
+      setQuestionUpdateError('Question and answer cannot be blank.');
+      return;
+    }
+
+    try {
+      const res = await updateSecurityQuestion(questionAuthPassword, newQuestionInput, newAnswerInput);
+      if (!res.success) {
+        setQuestionUpdateError(res.error || 'Failed to update security question.');
+        return;
+      }
+
+      setQuestionUpdateSuccess('Security question updated successfully!');
+      setQuestionAuthPassword('');
+      setNewQuestionInput('');
+      setNewAnswerInput('');
+      showToast('Security question updated', 'success');
+      await loadAll();
+      setTimeout(() => setIsQuestionModalOpen(false), 1500);
+    } catch (err: unknown) {
+      setQuestionUpdateError(err instanceof Error ? err.message : 'Failed to update security question.');
     }
   };
 
@@ -838,43 +969,153 @@ export const SettingsView: React.FC = () => {
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+            <div className="space-y-4 pt-2">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  New Master Password
+                  Current Master Password <span className="text-rose-400">*</span>
                 </label>
                 <input
                   type="password"
                   required
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="At least 6 characters"
-                  className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  placeholder="Enter current password to authorize change"
+                  className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-blue-500"
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Confirm New Password
-                </label>
-                <input
-                  type="password"
-                  required
-                  value={confirmNewPassword}
-                  onChange={(e) => setConfirmNewPassword(e.target.value)}
-                  placeholder="Repeat new password"
-                  className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    New Master Password <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Min 8 characters (letters & numbers)"
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                    Confirm New Password <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                    placeholder="Repeat new password"
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60 text-[11px] text-slate-400 space-y-1">
+                <p className="font-semibold text-slate-300">Password Policy Requirements:</p>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  <li>At least 8 characters in length</li>
+                  <li>Must contain both letters and digits or symbols</li>
+                  <li>Changing your password will immediately revoke other active sessions</li>
+                </ul>
               </div>
             </div>
 
             <button
               type="submit"
-              className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 font-semibold text-xs text-white"
+              className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 font-semibold text-xs text-white shadow-md shadow-blue-600/30 transition"
             >
               Update Password
             </button>
           </form>
+
+          {/* Emergency Recovery Codes Card */}
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Shield className="w-4 h-4 text-amber-400" />
+                  <span>One-Time Emergency Recovery Codes</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Offline multi-factor recovery codes. In case you lose your password and cannot answer the security question, these single-use codes immediately restore account access.
+                </p>
+              </div>
+              <span
+                className={`px-3 py-1 rounded-full text-xs font-bold shrink-0 ${
+                  remainingCodesCount > 2
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                    : remainingCodesCount > 0
+                    ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                    : 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
+                }`}
+              >
+                {remainingCodesCount} of {totalCodesCount} remaining
+              </span>
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setGenCodesPassword('');
+                  setGenCodesError('');
+                  setGeneratedCodesList(null);
+                  setIsGenCodesModalOpen(true);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 font-semibold text-xs text-white shadow-md shadow-amber-600/30 transition flex items-center gap-2"
+              >
+                <Key className="w-4 h-4" />
+                <span>Generate New Recovery Codes</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Security Question Card */}
+          <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <HelpCircle className="w-4 h-4 text-purple-400" />
+                  <span>Security Question & Answer</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-1">
+                  Fallback recovery option. Answers are hashed with PBKDF2 salt before storage.
+                </p>
+              </div>
+              <span className="px-3 py-1 rounded-full text-xs font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                {currentSecurityQuestion ? 'Configured' : 'Not Set'}
+              </span>
+            </div>
+
+            {currentSecurityQuestion && (
+              <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60 text-xs text-slate-300">
+                <span className="text-slate-400 block text-[11px] mb-0.5">Current Question:</span>
+                <span className="font-medium text-white">{currentSecurityQuestion}</span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setQuestionAuthPassword('');
+                  setNewQuestionInput(currentSecurityQuestion || '');
+                  setNewAnswerInput('');
+                  setQuestionUpdateError('');
+                  setQuestionUpdateSuccess('');
+                  setIsQuestionModalOpen(true);
+                }}
+                className="px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 font-semibold text-xs text-white shadow-md shadow-purple-600/30 transition flex items-center gap-2"
+              >
+                <HelpCircle className="w-4 h-4" />
+                <span>Update Security Question</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1436,6 +1677,220 @@ export const SettingsView: React.FC = () => {
           confirmLabel="Erase All Data"
           variant="danger"
         />
+      )}
+
+      {/* Emergency Recovery Codes Modal */}
+      {isGenCodesModalOpen && (
+        <Modal
+          isOpen={isGenCodesModalOpen}
+          onClose={() => {
+            setIsGenCodesModalOpen(false);
+            setGeneratedCodesList(null);
+            setGenCodesPassword('');
+          }}
+          title="Emergency Recovery Codes"
+        >
+          {!generatedCodesList ? (
+            <form onSubmit={handleGenerateCodesSubmit} className="space-y-4">
+              <p className="text-xs text-slate-300">
+                Generating a new batch of 8 emergency recovery codes will{' '}
+                <strong className="text-amber-400">immediately invalidate all previous recovery codes</strong>.
+              </p>
+
+              {genCodesError && (
+                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
+                  {genCodesError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  Confirm Current Master Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={genCodesPassword}
+                  onChange={(e) => setGenCodesPassword(e.target.value)}
+                  placeholder="Enter master password to authorize"
+                  className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-amber-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsGenCodesModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-xs font-bold text-white shadow-md shadow-amber-600/30"
+                >
+                  Generate 8 New Codes
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs">
+                Save these codes in a secure location (e.g. password vault, safe). Each code can only be used once to regain access.
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5 p-3 rounded-xl bg-slate-950 border border-slate-800">
+                {generatedCodesList.map((code, idx) => (
+                  <div
+                    key={idx}
+                    className="p-2 rounded-lg bg-slate-900 border border-slate-800 font-mono text-center text-xs font-bold text-amber-300 tracking-wider"
+                  >
+                    <span className="text-slate-500 mr-2 text-[10px]">{idx + 1}.</span>
+                    {code}
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyCodes}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700"
+                  >
+                    {copiedCodes ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5 text-blue-400" />}
+                    <span>{copiedCodes ? 'Copied!' : 'Copy All'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadCodesTxt}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Save .txt</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePrintCodes}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Print</span>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsGenCodesModalOpen(false);
+                    setGeneratedCodesList(null);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white shadow-md shadow-blue-600/30"
+                >
+                  I Have Saved These Codes
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* Update Security Question Modal */}
+      {isQuestionModalOpen && (
+        <Modal
+          isOpen={isQuestionModalOpen}
+          onClose={() => setIsQuestionModalOpen(false)}
+          title="Update Security Question"
+        >
+          <form onSubmit={handleUpdateQuestionSubmit} className="space-y-4">
+            <p className="text-xs text-slate-300">
+              Update your recovery security question. You must authenticate with your current master password first.
+            </p>
+
+            {questionUpdateError && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs">
+                {questionUpdateError}
+              </div>
+            )}
+            {questionUpdateSuccess && (
+              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">
+                {questionUpdateSuccess}
+              </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                Current Master Password <span className="text-rose-400">*</span>
+              </label>
+              <input
+                type="password"
+                required
+                value={questionAuthPassword}
+                onChange={(e) => setQuestionAuthPassword(e.target.value)}
+                placeholder="Enter current password to authorize"
+                className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-purple-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                New Security Question <span className="text-rose-400">*</span>
+              </label>
+              <select
+                value={newQuestionInput}
+                onChange={(e) => setNewQuestionInput(e.target.value)}
+                className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-purple-500 mb-2"
+              >
+                <option value="">-- Choose a standard question --</option>
+                <option value="What was your first childhood pet's name?">What was your first childhood pet's name?</option>
+                <option value="In what city was your first company registered?">In what city was your first company registered?</option>
+                <option value="What was the model of your first vehicle?">What was the model of your first vehicle?</option>
+                <option value="What is the name of your favorite teacher?">What is the name of your favorite teacher?</option>
+              </select>
+              <input
+                type="text"
+                required
+                value={newQuestionInput}
+                onChange={(e) => setNewQuestionInput(e.target.value)}
+                placeholder="Or write a custom security question..."
+                className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-purple-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                New Answer <span className="text-rose-400">*</span>
+              </label>
+              <input
+                type="text"
+                required
+                value={newAnswerInput}
+                onChange={(e) => setNewAnswerInput(e.target.value)}
+                placeholder="Enter secret answer (case-insensitive)"
+                className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white focus:outline-none focus:border-purple-500"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">
+                Your answer is stored as a cryptographic hash and cannot be viewed by anyone.
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsQuestionModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-xs font-bold text-white shadow-md shadow-purple-600/30"
+              >
+                Save Security Question
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
     </div>
   );

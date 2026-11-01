@@ -5,7 +5,14 @@
 
 export type ID = string;
 
-// --- Authentication & Local Security ---
+export interface RecoveryCodeRecord {
+  id: string;
+  codeHash: string;
+  salt: string;
+  createdAt: string;
+  usedAt?: string;
+}
+
 export interface LocalUser {
   id: ID;
   username: string;
@@ -15,6 +22,13 @@ export interface LocalUser {
   salt: string;
   securityQuestion: string;
   securityAnswerHash: string;
+  recoveryCodes?: RecoveryCodeRecord[];
+  failedRecoveryAttempts?: number;
+  recoveryLockoutUntil?: string;
+  failedLoginAttempts?: number;
+  loginLockoutUntil?: string;
+  passwordChangedAt?: string;
+  sessionVersion?: number;
   createdAt: string;
   lastLoginAt: string;
 }
@@ -26,6 +40,7 @@ export interface AuthSession {
   isAuthenticated: boolean;
   isLocked: boolean;
   lastActiveTimestamp: number;
+  sessionVersion?: number;
 }
 
 // --- Audit Trail ---
@@ -34,6 +49,18 @@ export type AuditAction =
   | 'AUTH_LOGOUT'
   | 'AUTH_LOCK'
   | 'AUTH_UNLOCK'
+  | 'PASSWORD_CHANGE_REQUESTED'
+  | 'PASSWORD_CHANGED'
+  | 'PASSWORD_RESET_REQUESTED'
+  | 'PASSWORD_RESET_COMPLETED'
+  | 'PASSWORD_RESET_FAILED'
+  | 'RECOVERY_CODE_GENERATED'
+  | 'RECOVERY_CODE_USED'
+  | 'RECOVERY_CODE_REVOKED'
+  | 'SECURITY_QUESTION_UPDATED'
+  | 'ACTIVE_SESSIONS_REVOKED'
+  | 'SERVER_RECOVERY_REQUESTED'
+  | 'SERVER_RECOVERY_COMPLETED'
   | 'CLIENT_CREATE'
   | 'CLIENT_UPDATE'
   | 'CLIENT_STATUS_CHANGE'

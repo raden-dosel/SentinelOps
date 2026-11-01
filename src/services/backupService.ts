@@ -201,6 +201,11 @@ export async function validateBackupFile(file: File): Promise<RestorePreview> {
         return { valid: false, error: 'Corrupt backup file: Expected client, quotation, and invoice collections.' };
       }
 
+      const val = validateBackupPayload(data);
+      if (!val.valid) {
+        return { valid: false, error: val.error };
+      }
+
       return { valid: true, manifest: data.manifest, previewData: data };
     }
 
@@ -214,8 +219,9 @@ export async function validateBackupFile(file: File): Promise<RestorePreview> {
       const text = await jsonFile.async('string');
       const data = JSON.parse(text) as BackupData;
 
-      if (!data.manifest || data.manifest.appName !== 'SentinelOps') {
-        return { valid: false, error: 'Invalid ZIP backup: Invalid SentinelOps manifest header.' };
+      const val = validateBackupPayload(data);
+      if (!val.valid) {
+        return { valid: false, error: val.error };
       }
 
       return { valid: true, manifest: data.manifest, previewData: data };
@@ -228,6 +234,75 @@ export async function validateBackupFile(file: File): Promise<RestorePreview> {
 }
 
 /**
+ * Validates internal monetary consistency, relationships, and duplicate keys in backup data
+ */
+export function validateBackupPayload(data: BackupData): { valid: boolean; error?: string } {
+  if (!data.manifest || data.manifest.appName !== 'SentinelOps') {
+    return { valid: false, error: 'Invalid backup file: Missing or invalid SentinelOps manifest header.' };
+  }
+
+  if (data.manifest.schemaVersion > DB_VERSION) {
+    return {
+      valid: false,
+      error: `Incompatible backup version: File requires schema v${data.manifest.schemaVersion}, but current app supports v${DB_VERSION}.`,
+    };
+  }
+
+  if (!Array.isArray(data.clients) || !Array.isArray(data.quotations) || !Array.isArray(data.invoices)) {
+    return { valid: false, error: 'Corrupt backup file: Expected client, quotation, and invoice collections.' };
+  }
+
+  // Validate invoices
+  const invoiceIds = new Set<string>();
+  const invoiceNumbers = new Set<string>();
+  for (const inv of data.invoices || []) {
+    if (inv.grandTotalCentavos < 0 || inv.paidAmountCentavos < 0 || inv.remainingBalanceCentavos < 0) {
+      return { valid: false, error: `Invalid monetary amount in invoice ${inv.invoiceNumber || inv.id}: negative centavos.` };
+    }
+    if (inv.invoiceNumber) {
+      if (invoiceNumbers.has(inv.invoiceNumber)) {
+        return { valid: false, error: `Duplicate invoice number detected in backup: '${inv.invoiceNumber}'.` };
+      }
+      invoiceNumbers.add(inv.invoiceNumber);
+    }
+    invoiceIds.add(inv.id);
+  }
+
+  // Validate payments
+  const paymentNumbers = new Set<string>();
+  for (const pay of data.payments || []) {
+    if (pay.amountCentavos <= 0) {
+      return { valid: false, error: `Invalid payment amount in payment ${pay.paymentNumber || pay.id}: amount must be positive.` };
+    }
+    if (pay.paymentNumber) {
+      if (paymentNumbers.has(pay.paymentNumber)) {
+        return { valid: false, error: `Duplicate payment number detected in backup: '${pay.paymentNumber}'.` };
+      }
+      paymentNumbers.add(pay.paymentNumber);
+    }
+    if (pay.invoiceId && !invoiceIds.has(pay.invoiceId)) {
+      return { valid: false, error: `Payment ${pay.paymentNumber || pay.id} references missing invoice ${pay.invoiceId}.` };
+    }
+  }
+
+  // Validate quotations
+  const quotationNumbers = new Set<string>();
+  for (const q of data.quotations || []) {
+    if (q.grandTotalCentavos < 0) {
+      return { valid: false, error: `Invalid quotation total in quotation ${q.quotationNumber || q.id}: negative centavos.` };
+    }
+    if (q.quotationNumber) {
+      if (quotationNumbers.has(q.quotationNumber)) {
+        return { valid: false, error: `Duplicate quotation number detected in backup: '${q.quotationNumber}'.` };
+      }
+      quotationNumbers.add(q.quotationNumber);
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
  * Restores database from a validated BackupData object
  */
 export async function restoreBackupData(
@@ -235,7 +310,26 @@ export async function restoreBackupData(
   file?: File,
   actorName = 'Admin'
 ): Promise<void> {
+  const validation = validateBackupPayload(data);
+  if (!validation.valid) {
+    throw new Error(validation.error || 'Backup validation failed.');
+  }
+
   const db = await getDatabase();
+
+  // Step 0: Create pre-restore safety snapshot in syncMetadata so rollback is always possible
+  try {
+    const preRestoreBackup = await createBackupPayload();
+    const safetyMeta = {
+      id: 'pre_restore_safety_backup',
+      data: preRestoreBackup,
+      createdAt: new Date().toISOString(),
+    };
+    await db.put('syncMetadata', safetyMeta as any);
+  } catch (err) {
+    console.warn('Failed to save pre-restore safety snapshot:', err);
+  }
+
   const stores = [
     'settings',
     'clients',
@@ -323,6 +417,34 @@ export async function restoreBackupData(
     actorName,
     details: { recordCounts: data.manifest.recordCounts },
   });
+}
+
+/**
+ * Retrieves the safety snapshot taken immediately prior to the most recent destructive restore
+ */
+export async function getPreRestoreSafetyBackup(): Promise<{ data: BackupData; createdAt: string } | null> {
+  try {
+    const db = await getDatabase();
+    const record = await db.get('syncMetadata', 'pre_restore_safety_backup');
+    if (record && (record as any).data) {
+      return { data: (record as any).data, createdAt: (record as any).createdAt };
+    }
+  } catch (e) {
+    console.warn('Failed to retrieve safety backup:', e);
+  }
+  return null;
+}
+
+/**
+ * Reverts database to the safety snapshot captured before the last restore operation
+ */
+export async function revertToPreRestoreBackup(actorName = 'Admin'): Promise<boolean> {
+  const safety = await getPreRestoreSafetyBackup();
+  if (!safety) {
+    throw new Error('No pre-restore safety backup available to revert to.');
+  }
+  await restoreBackupData(safety.data, undefined, actorName);
+  return true;
 }
 
 /**

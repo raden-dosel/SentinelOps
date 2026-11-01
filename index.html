@@ -21,18 +21,39 @@
       (function () {
         var origConsoleError = console.error;
         console.error = function () {
-          var firstArg = arguments[0];
+          var str = '';
+          for (var i = 0; i < arguments.length; i++) {
+            var a = arguments[i];
+            if (typeof a === 'string') {
+              str += a + ' ';
+            } else if (a && typeof a === 'object') {
+              str += (a.message || '') + ' ' + (a.stack || '') + ' ' + String(a) + ' ';
+            }
+          }
           if (
-            typeof firstArg === 'string' &&
-            (firstArg.includes('[vite] failed to connect to websocket') ||
-              firstArg.includes('WebSocket (failing)') ||
-              firstArg.includes('Check out your Vite / network configuration'))
+            str.includes('[vite] failed to connect to websocket') ||
+            str.includes('WebSocket (failing)') ||
+            str.includes('Check out your Vite / network configuration') ||
+            str.includes("reading 'send'") ||
+            str.includes('pwa-entry-point-loaded') ||
+            str.includes('registerDevSW') ||
+            str.includes('vite-pwa-plugin:dev-ready')
           ) {
             // Environment constraint: "HMR: Disabled. Ignore WebSocket errors."
             return;
           }
           return origConsoleError.apply(console, arguments);
         };
+
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (registrations) {
+            for (var i = 0; i < registrations.length; i++) {
+              if (registrations[i].active && registrations[i].active.scriptURL.includes('dev-sw')) {
+                registrations[i].unregister();
+              }
+            }
+          }).catch(function () {});
+        }
       })();
       window.addEventListener('error', function (e) {
         if (

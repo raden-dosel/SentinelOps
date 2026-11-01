@@ -175,3 +175,145 @@ export async function decryptPayload(
   const decoder = new TextDecoder();
   return decoder.decode(decryptedBuffer);
 }
+
+// Unambiguous character set for recovery codes (32 characters, no 0/O or 1/I/L)
+const RECOVERY_CHARSET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+/**
+ * Normalize recovery code string (removes whitespace, dashes, REC- prefix, converts uppercase)
+ */
+export function normalizeRecoveryCode(code: string): string {
+  return code
+    .trim()
+    .toUpperCase()
+    .replace(/^REC-?/i, '')
+    .replace(/[^23456789ABCDEFGHJKLMNPQRSTUVWXYZ]/g, '');
+}
+
+/**
+ * Format raw 8-character normalized code into readable REC-XXXX-XXXX display
+ */
+export function formatRecoveryCode(normalizedCode: string): string {
+  const clean = normalizeRecoveryCode(normalizedCode);
+  if (clean.length < 8) return clean;
+  return `REC-${clean.substring(0, 4)}-${clean.substring(4, 8)}`;
+}
+
+/**
+ * Validate password strength policy
+ * Policy: Min 8 characters, at least one letter, and at least one number or symbol
+ */
+export function validatePasswordStrength(password: string): { isValid: boolean; message?: string } {
+  if (!password || password.length < 8) {
+    return { isValid: false, message: 'Password must be at least 8 characters long.' };
+  }
+  if (!/[A-Za-z]/.test(password)) {
+    return { isValid: false, message: 'Password must contain at least one letter.' };
+  }
+  if (!/[0-9!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password)) {
+    return { isValid: false, message: 'Password must contain at least one number or special symbol.' };
+  }
+  return { isValid: true };
+}
+
+/**
+ * Check if an operation is currently locked out due to prior failed attempts
+ */
+export function checkAttemptLockout(
+  failedAttempts = 0,
+  lockoutUntil?: string
+): { isLocked: boolean; remainingSeconds?: number } {
+  if (!lockoutUntil) return { isLocked: false };
+  const lockoutTime = new Date(lockoutUntil).getTime();
+  const now = Date.now();
+  if (now < lockoutTime) {
+    const remainingSeconds = Math.ceil((lockoutTime - now) / 1000);
+    return { isLocked: true, remainingSeconds };
+  }
+  return { isLocked: false };
+}
+
+/**
+ * Calculate progressive lockout delay based on number of consecutive failures
+ */
+export function calculateNextLockout(consecutiveFailures: number): {
+  lockoutUntil?: string;
+  lockoutSeconds: number;
+} {
+  let lockoutSeconds = 0;
+  if (consecutiveFailures >= 7) {
+    lockoutSeconds = 900; // 15 minutes
+  } else if (consecutiveFailures >= 5) {
+    lockoutSeconds = 300; // 5 minutes
+  } else if (consecutiveFailures >= 3) {
+    lockoutSeconds = 60; // 1 minute
+  }
+
+  if (lockoutSeconds > 0) {
+    const lockoutUntil = new Date(Date.now() + lockoutSeconds * 1000).toISOString();
+    return { lockoutUntil, lockoutSeconds };
+  }
+  return { lockoutSeconds: 0 };
+}
+
+/**
+ * Generate a set of cryptographically random, single-use emergency recovery codes.
+ * Returns displayable formatted strings for the user and salted PBKDF2 hashes for storage.
+ */
+export async function generateRecoveryCodes(count = 8): Promise<{
+  rawCodes: string[];
+  hashedCodes: { id: string; codeHash: string; salt: string; createdAt: string }[];
+}> {
+  const rawCodes: string[] = [];
+  const hashedCodes: { id: string; codeHash: string; salt: string; createdAt: string }[] = [];
+  const now = new Date().toISOString();
+
+  for (let i = 0; i < count; i++) {
+    // 8 characters from 32-char high-entropy set
+    const randomBytes = new Uint8Array(8);
+    crypto.getRandomValues(randomBytes);
+    let code = '';
+    for (let j = 0; j < 8; j++) {
+      code += RECOVERY_CHARSET[randomBytes[j] % RECOVERY_CHARSET.length];
+    }
+
+    const formattedCode = formatRecoveryCode(code);
+    const normalized = normalizeRecoveryCode(code);
+
+    const salt = generateSalt(16);
+    const codeHash = await hashPassword(normalized, salt);
+
+    rawCodes.push(formattedCode);
+    hashedCodes.push({
+      id: generateUUID(),
+      codeHash,
+      salt,
+      createdAt: now,
+    });
+  }
+
+  return { rawCodes, hashedCodes };
+}
+
+/**
+ * Verify a submitted recovery code against a list of unused hashed recovery codes.
+ */
+export async function verifyRecoveryCode(
+  attempt: string,
+  records: { id: string; codeHash: string; salt: string; usedAt?: string }[]
+): Promise<{ isValid: boolean; matchedCodeId?: string }> {
+  const normalizedAttempt = normalizeRecoveryCode(attempt);
+  if (normalizedAttempt.length !== 8) {
+    return { isValid: false };
+  }
+
+  const unusedRecords = records.filter((r) => !r.usedAt);
+  for (const record of unusedRecords) {
+    const isMatch = await verifyPassword(normalizedAttempt, record.codeHash, record.salt);
+    if (isMatch) {
+      return { isValid: true, matchedCodeId: record.id };
+    }
+  }
+
+  return { isValid: false };
+}

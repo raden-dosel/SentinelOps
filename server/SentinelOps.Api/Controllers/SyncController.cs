@@ -113,6 +113,117 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
                     results.Add(new(operation.OperationId, "rejected", ErrorCode: valError, Message: valMessage));
                     continue;
                 }
+
+                // If Invoice: validate uniqueness of invoiceNumber within business, and maintain typed InvoiceRecord
+                if (operation.EntityType == "Invoice")
+                {
+                    var invNumber = root.TryGetProperty("invoiceNumber", out var inProp) ? inProp.GetString() ?? string.Empty : string.Empty;
+                    var existingWithNum = await db.Invoices.AsNoTracking().FirstOrDefaultAsync(
+                        x => x.BusinessId == identity.Value.BusinessId && x.InvoiceNumber == invNumber && x.Id != operation.EntityId,
+                        cancellationToken);
+                    if (existingWithNum is not null)
+                    {
+                        results.Add(new(operation.OperationId, "rejected", ErrorCode: "duplicate_invoice_number",
+                            Message: $"Invoice number '{invNumber}' is already in use by another invoice in this business."));
+                        continue;
+                    }
+
+                    var grandTotal = root.TryGetProperty("grandTotalCentavos", out var gt) ? gt.GetInt64() : 0L;
+                    var paidAmount = root.TryGetProperty("paidAmountCentavos", out var pa) ? pa.GetInt64() : 0L;
+                    var remaining = root.TryGetProperty("remainingBalanceCentavos", out var rb) ? rb.GetInt64() : Math.Max(0, grandTotal - paidAmount);
+                    var status = root.TryGetProperty("status", out var st) ? st.GetString() ?? "DRAFT" : "DRAFT";
+
+                    var typedInvoice = await db.Invoices.SingleOrDefaultAsync(
+                        x => x.BusinessId == identity.Value.BusinessId && x.Id == operation.EntityId,
+                        cancellationToken);
+                    if (typedInvoice is null)
+                    {
+                        typedInvoice = new InvoiceRecord
+                        {
+                            Id = operation.EntityId,
+                            BusinessId = identity.Value.BusinessId,
+                            InvoiceNumber = invNumber,
+                            Status = status,
+                            GrandTotalCentavos = grandTotal,
+                            PaidAmountCentavos = paidAmount,
+                            RemainingBalanceCentavos = remaining,
+                            IssueDate = root.TryGetProperty("issueDate", out var idProp) && DateTime.TryParse(idProp.GetString(), out var idDt) ? idDt.ToUniversalTime() : DateTime.UtcNow,
+                            DueDate = root.TryGetProperty("dueDate", out var ddProp) && DateTime.TryParse(ddProp.GetString(), out var ddDt) ? ddDt.ToUniversalTime() : DateTime.UtcNow.AddDays(30),
+                            CreatedAtUtc = DateTime.UtcNow
+                        };
+                        db.Invoices.Add(typedInvoice);
+                    }
+                    else
+                    {
+                        typedInvoice.InvoiceNumber = invNumber;
+                        typedInvoice.Status = status;
+                        typedInvoice.GrandTotalCentavos = grandTotal;
+                        typedInvoice.PaidAmountCentavos = paidAmount;
+                        typedInvoice.RemainingBalanceCentavos = remaining;
+                        typedInvoice.UpdatedAtUtc = DateTime.UtcNow;
+                    }
+                }
+                // If Payment: enforce overpayment prevention and maintain typed PaymentRecord
+                else if (operation.EntityType == "Payment")
+                {
+                    var payNumber = root.TryGetProperty("paymentNumber", out var pnProp) ? pnProp.GetString() ?? string.Empty : string.Empty;
+                    var amount = root.TryGetProperty("amountCentavos", out var amProp) ? amProp.GetInt64() : 0L;
+                    var isReversed = root.TryGetProperty("isReversed", out var revProp) && revProp.GetBoolean();
+                    var invoiceIdGuid = root.TryGetProperty("invoiceId", out var invIdProp) && Guid.TryParse(invIdProp.GetString(), out var parsedInvId) ? parsedInvId : Guid.Empty;
+
+                    if (invoiceIdGuid != Guid.Empty)
+                    {
+                        var targetInvoice = await db.Invoices.SingleOrDefaultAsync(
+                            x => x.BusinessId == identity.Value.BusinessId && x.Id == invoiceIdGuid,
+                            cancellationToken);
+
+                        if (targetInvoice is not null && !isReversed)
+                        {
+                            var otherPaymentsSum = await db.Payments
+                                .Where(p => p.BusinessId == identity.Value.BusinessId && p.InvoiceId == invoiceIdGuid && p.Id != operation.EntityId && !p.IsReversed)
+                                .SumAsync(p => (long?)p.AmountCentavos, cancellationToken) ?? 0L;
+
+                            if (otherPaymentsSum + amount > targetInvoice.GrandTotalCentavos)
+                            {
+                                results.Add(new(operation.OperationId, "rejected", ErrorCode: "overpayment_exceeded",
+                                    Message: $"Payment of {amount} centavos would exceed invoice grand total of {targetInvoice.GrandTotalCentavos} centavos (already paid: {otherPaymentsSum})."));
+                                continue;
+                            }
+                        }
+
+                        var typedPayment = await db.Payments.SingleOrDefaultAsync(
+                            x => x.BusinessId == identity.Value.BusinessId && x.Id == operation.EntityId,
+                            cancellationToken);
+                        if (typedPayment is null)
+                        {
+                            typedPayment = new PaymentRecord
+                            {
+                                Id = operation.EntityId,
+                                BusinessId = identity.Value.BusinessId,
+                                InvoiceId = invoiceIdGuid,
+                                PaymentNumber = payNumber,
+                                AmountCentavos = amount,
+                                PaymentMethod = root.TryGetProperty("paymentMethod", out var pmProp) ? pmProp.GetString() ?? "CASH" : "CASH",
+                                ReferenceNumber = root.TryGetProperty("referenceNumber", out var refProp) ? refProp.GetString() : null,
+                                IsReversed = isReversed,
+                                ReversalReason = root.TryGetProperty("reversalReason", out var rrProp) ? rrProp.GetString() : null,
+                                PaymentDate = root.TryGetProperty("paymentDate", out var pdProp) && DateTime.TryParse(pdProp.GetString(), out var pdDt) ? pdDt.ToUniversalTime() : DateTime.UtcNow,
+                                CreatedAtUtc = DateTime.UtcNow
+                            };
+                            db.Payments.Add(typedPayment);
+                        }
+                        else
+                        {
+                            typedPayment.AmountCentavos = amount;
+                            typedPayment.IsReversed = isReversed;
+                            typedPayment.ReversalReason = root.TryGetProperty("reversalReason", out var rrProp) ? rrProp.GetString() : typedPayment.ReversalReason;
+                            if (isReversed && typedPayment.ReversedAtUtc is null)
+                            {
+                                typedPayment.ReversedAtUtc = DateTime.UtcNow;
+                            }
+                        }
+                    }
+                }
             }
 
             var revision = Guid.NewGuid().ToString("N");
@@ -216,17 +327,38 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
 
     [HttpGet("snapshot")]
     public async Task<ActionResult<SnapshotResponse>> Snapshot(
-        [FromQuery] int limit = 500, CancellationToken cancellationToken = default)
+        [FromQuery] int limit = 500, [FromQuery] string? continuation = null, CancellationToken cancellationToken = default)
     {
+        if (limit is < 1 or > 1000) limit = 500;
         var deviceId = Request.Headers["X-Device-Id"].ToString();
         if (!Guid.TryParse(deviceId, out var parsedDeviceId)) return Unauthorized();
         var identity = await AuthenticateAsync(parsedDeviceId, cancellationToken);
         if (identity is null) return Unauthorized();
 
-        var entities = await db.SyncEntities.AsNoTracking()
-            .Where(x => x.BusinessId == identity.Value.BusinessId)
-            .Take(limit)
+        var query = db.SyncEntities.AsNoTracking()
+            .Where(x => x.BusinessId == identity.Value.BusinessId);
+
+        var offset = 0;
+        if (!string.IsNullOrWhiteSpace(continuation) && int.TryParse(continuation, out var parsedOffset) && parsedOffset >= 0)
+        {
+            offset = parsedOffset;
+        }
+
+        var entities = await query
+            .OrderBy(x => x.CreatedAtUtc)
+            .ThenBy(x => x.EntityType)
+            .ThenBy(x => x.EntityId)
+            .Skip(offset)
+            .Take(limit + 1)
             .ToListAsync(cancellationToken);
+
+        var hasMore = entities.Count > limit;
+        if (hasMore)
+        {
+            entities = entities.Take(limit).ToList();
+        }
+
+        var nextContinuation = hasMore ? (offset + limit).ToString() : null;
 
         var maxSeq = await db.ChangeFeedEntries.AsNoTracking()
             .Where(x => x.BusinessId == identity.Value.BusinessId)
@@ -242,7 +374,8 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
                 JsonSerializer.Deserialize<JsonElement>(x.PayloadJson)
             )).ToList(),
             snapshotCursor,
-            HasMore: entities.Count >= limit
+            hasMore,
+            nextContinuation
         ));
     }
 
@@ -399,10 +532,11 @@ public sealed class SyncController(SentinelOpsDbContext db, IConfiguration confi
         if (!presented.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return null;
         var token = presented["Bearer ".Length..].Trim();
         if (token.Length < 32) return null;
-        var device = await db.RegisteredDevices.AsNoTracking().SingleOrDefaultAsync(
+        var device = await db.RegisteredDevices.SingleOrDefaultAsync(
             x => x.Id == deviceId && x.RevokedAtUtc == null, cancellationToken);
         if (device is null || !CryptographicOperations.FixedTimeEquals(
             Convert.FromHexString(device.TokenHash), SHA256.HashData(Encoding.UTF8.GetBytes(token)))) return null;
+        device.LastSeenAtUtc = DateTime.UtcNow;
         return (device.BusinessId, device.Id);
     }
 }

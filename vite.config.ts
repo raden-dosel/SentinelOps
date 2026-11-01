@@ -4,13 +4,16 @@ import { VitePWA } from 'vite-plugin-pwa';
 import path from 'path';
 import { defineConfig } from 'vite';
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
+  const isDev = command === 'serve';
+
   return {
     plugins: [
       react(),
       tailwindcss(),
       VitePWA({
-        disable: process.env.NODE_ENV !== 'production',
+        disable: isDev,
+        injectRegister: null,
         registerType: 'prompt',
         includeAssets: ['icons/*.png'],
         manifest: {

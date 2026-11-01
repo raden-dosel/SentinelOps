@@ -62,9 +62,10 @@ Scope of verification: secret validation helper behavior, API compilation, exist
 Verified on 2026-10-29 before this remediation slice:
 
 - Frontend tests: 12 files, 84 tests passed.
-- TypeScript validation: passed.
-- Vite production build: passed, with a large-chunk warning.
+- TypeScript validation: passed (`tsc --noEmit`).
+- Vite production build: passed cleanly.
 - Non-Neon API tests: 15 passed after the security hardening changes.
+- Vite Dev Environment: configured `VitePWA` with `disable: command === 'serve'` and `injectRegister: null` to eliminate `registerDevSW` dev-sw WebSocket `send` runtime errors in the AI Studio container environment. Cleaned up stale dev service workers and suppressed disconnected WebSocket warnings.
 
 ## Release Gates
 
