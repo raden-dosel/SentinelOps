@@ -4,6 +4,37 @@ import { VitePWA } from 'vite-plugin-pwa';
 import path from 'path';
 import { defineConfig } from 'vite';
 
+function suppressHmrWebSocketPlugin() {
+  return {
+    name: 'suppress-hmr-websocket',
+    enforce: 'post' as const,
+    transform(code: string, id: string) {
+      if (id.includes('client.mjs') || id.includes('/@vite/client')) {
+        let modified = code;
+        // Make connect(handlers) a clean no-op so no WebSocket attempt occurs
+        modified = modified.replace(
+          /async\s+connect\(handlers\)\s*\{/g,
+          'async connect(handlers) { return;'
+        );
+        modified = modified.replace(
+          /send\(data\)\s*\{\s*wsTransport\.send\(data\);\s*\}/g,
+          'send(data) { try { wsTransport?.send?.(data); } catch {} }'
+        );
+        modified = modified.replace(
+          /console\.error\(\s*`\[vite\] failed to connect to websocket[\s\S]*?\`\s*\);/g,
+          '/* [vite] websocket connection suppressed */'
+        );
+        modified = modified.replace(
+          /console\.info\(\s*"\[vite\] Direct websocket connection fallback[\s\S]*?"\s*\);/g,
+          '/* [vite] websocket fallback suppressed */'
+        );
+        return modified;
+      }
+      return null;
+    },
+  };
+}
+
 export default defineConfig(({ command }) => {
   const isDev = command === 'serve';
 
@@ -11,6 +42,7 @@ export default defineConfig(({ command }) => {
     plugins: [
       react(),
       tailwindcss(),
+      suppressHmrWebSocketPlugin(),
       ...(!isDev
         ? [
             VitePWA({
@@ -70,7 +102,6 @@ export default defineConfig(({ command }) => {
       port: 3000,
       host: '0.0.0.0',
       hmr: false as const,
-      ws: false as const,
     },
   };
 });

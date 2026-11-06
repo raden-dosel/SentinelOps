@@ -12,12 +12,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { syncConfigRepository } from '../storage/repositories';
 
-export type ConnectivityStatus = 'checking' | 'offline' | 'api-unreachable' | 'ready';
+export type ConnectivityStatus = 'checking' | 'offline' | 'api-unreachable' | 'not-enrolled' | 'ready';
 
 export interface ConnectivityState {
   status: ConnectivityStatus;
   isOnline: boolean;
   isApiReachable: boolean;
+  isEnrolled: boolean;
+  deviceId: string | null;
   apiBaseUrl: string | null;
   lastCheckedAt: string | null;
   errorMessage: string | null;
@@ -30,11 +32,16 @@ export const OFFLINE_WARNING =
 export const API_UNREACHABLE_WARNING =
   'SentinelOps server is unreachable. Image uploads are temporarily unavailable. Check your connection and try again.';
 
+export const ENROLLMENT_REQUIRED_WARNING =
+  'Device enrollment required. Enroll this tablet with SentinelOps to authorize Cloudflare R2 image uploads.';
+
 const REACHABILITY_TIMEOUT_MS = 6000;
 
 export function useConnectivity(): ConnectivityState {
   const [status, setStatus] = useState<ConnectivityStatus>('checking');
   const [apiBaseUrl, setApiBaseUrl] = useState<string | null>(null);
+  const [isEnrolled, setIsEnrolled] = useState<boolean>(false);
+  const [deviceId, setDeviceId] = useState<string | null>(null);
   const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -87,51 +94,80 @@ export function useConnectivity(): ConnectivityState {
     }, REACHABILITY_TIMEOUT_MS);
 
     try {
+      let config = null;
+      try {
+        config = await syncConfigRepository.getConfig();
+      } catch {
+        // IndexedDB read fallback
+      }
+
+      const enrolled = Boolean(config?.deviceId && config?.deviceToken);
+      if (isMountedRef.current) {
+        setIsEnrolled(enrolled);
+        setDeviceId(config?.deviceId || null);
+      }
+
       const targetBaseUrl = await resolveApiBaseUrl();
       if (isMountedRef.current) {
         setApiBaseUrl(targetBaseUrl);
       }
 
       if (!targetBaseUrl) {
-        // No server endpoint configured
         clearTimeout(timeoutId);
         if (isMountedRef.current) {
-          setStatus('api-unreachable');
-          setErrorMessage(API_UNREACHABLE_WARNING);
+          if (!enrolled) {
+            setStatus('not-enrolled');
+            setErrorMessage(ENROLLMENT_REQUIRED_WARNING);
+          } else {
+            setStatus('api-unreachable');
+            setErrorMessage(API_UNREACHABLE_WARNING);
+          }
           setLastCheckedAt(new Date().toISOString());
         }
-        return 'api-unreachable';
+        return !enrolled ? 'not-enrolled' : 'api-unreachable';
       }
 
       // Check lightweight liveness endpoint: /api/v1/health/live
-      const healthUrl = `${targetBaseUrl}/api/v1/health/live`;
-      const response = await fetch(healthUrl, {
-        method: 'GET',
-        signal: abortController.signal,
-        cache: 'no-store', // Avoid stale service-worker or browser cache
-        headers: {
-          'Accept': 'application/json',
-          'X-SentinelOps-Reachability-Check': 'true',
-        },
-      });
+      let apiHealthy = false;
+      try {
+        const healthUrl = `${targetBaseUrl}/api/v1/health/live`;
+        const response = await fetch(healthUrl, {
+          method: 'GET',
+          signal: abortController.signal,
+          cache: 'no-store', // Avoid stale service-worker or browser cache
+          headers: {
+            'Accept': 'application/json',
+            'X-SentinelOps-Reachability-Check': 'true',
+          },
+        });
+        apiHealthy = response.ok;
+      } catch {
+        apiHealthy = false;
+      }
 
       clearTimeout(timeoutId);
 
-      if (response.ok) {
-        if (isMountedRef.current) {
+      if (isMountedRef.current) {
+        setLastCheckedAt(new Date().toISOString());
+
+        if (!enrolled) {
+          setStatus('not-enrolled');
+          setErrorMessage(ENROLLMENT_REQUIRED_WARNING);
+          return 'not-enrolled';
+        }
+
+        if (apiHealthy) {
           setStatus('ready');
           setErrorMessage(null);
-          setLastCheckedAt(new Date().toISOString());
-        }
-        return 'ready';
-      } else {
-        if (isMountedRef.current) {
+          return 'ready';
+        } else {
           setStatus('api-unreachable');
           setErrorMessage(API_UNREACHABLE_WARNING);
-          setLastCheckedAt(new Date().toISOString());
+          return 'api-unreachable';
         }
-        return 'api-unreachable';
       }
+
+      return !enrolled ? 'not-enrolled' : apiHealthy ? 'ready' : 'api-unreachable';
     } catch (err: unknown) {
       clearTimeout(timeoutId);
       if (abortController.signal.aborted && !isMountedRef.current) {
@@ -194,6 +230,8 @@ export function useConnectivity(): ConnectivityState {
     status,
     isOnline: status !== 'offline',
     isApiReachable: status === 'ready',
+    isEnrolled,
+    deviceId,
     apiBaseUrl,
     lastCheckedAt,
     errorMessage,

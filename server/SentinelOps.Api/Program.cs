@@ -86,9 +86,9 @@ if (!SecurityConfiguration.IsAcceptableSecret(cursorKey))
             "Sync cursor signing key is missing, weak, or a development default. Configure SYNC_CURSOR_SIGNING_KEY before starting a non-development environment.");
     }
 
-    var generatedCursorKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-    builder.Configuration["Sync:CursorSigningKey"] = generatedCursorKey;
-    Console.WriteLine("[INFO] [SentinelOps Security] Generated an ephemeral development-only cursor signing key.");
+    const string devDefaultCursor = "SentinelOps-DevCursor-SigningKey-Minimum-32-Chars-2026!";
+    builder.Configuration["Sync:CursorSigningKey"] = devDefaultCursor;
+    Console.WriteLine("[INFO] [SentinelOps Security] Using standard development cursor signing key.");
 }
 else
 {
@@ -111,9 +111,9 @@ if (!SecurityConfiguration.IsAcceptableSecret(regToken, minimumLength: 16))
             "Sync registration token is missing, weak, or a development default. Configure SYNC_REGISTRATION_TOKEN before starting a non-development environment.");
     }
 
-    var generatedRegToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
-    builder.Configuration["Sync:RegistrationToken"] = generatedRegToken;
-    Console.WriteLine("[INFO] [SentinelOps Security] Generated an ephemeral development-only registration token.");
+    const string devDefaultToken = "SentinelOps-DevPairing-SecretKey-2026!";
+    builder.Configuration["Sync:RegistrationToken"] = devDefaultToken;
+    Console.WriteLine($"[INFO] [SentinelOps Security] Using standard development registration token: {devDefaultToken}");
 }
 else
 {

@@ -77,7 +77,9 @@ export const SettingsView: React.FC = () => {
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isEnrolling, setIsEnrolling] = useState(false);
   const [enrollServerUrl, setEnrollServerUrl] = useState(
-    import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
+    (import.meta as any)?.env?.VITE_API_BASE_URL ||
+      (typeof window !== 'undefined' ? window.location.origin : '') ||
+      'http://localhost:5000'
   );
   const [enrollDeviceName, setEnrollDeviceName] = useState('Operations Tablet 1');
   const [enrollBusinessName, setEnrollBusinessName] = useState('Sentinel Security PH');
@@ -1593,7 +1595,7 @@ export const SettingsView: React.FC = () => {
                     className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-sm text-white placeholder-slate-500"
                   />
                   <p className="text-[11px] text-slate-500 mt-1">
-                    Matches the server's <code>Sync:RegistrationToken</code> configuration.
+                    Matches the server's <code>Sync:RegistrationToken</code> configuration. Development key: <code className="text-emerald-400 select-all">SentinelOps-DevPairing-SecretKey-2026!</code>
                   </p>
                 </div>
               </div>

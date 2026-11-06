@@ -277,17 +277,22 @@ export async function uploadSingleFileToR2(
     return currentItem;
   }
 
+  if (!config?.deviceId || !config?.deviceToken) {
+    currentItem.state = 'failed';
+    currentItem.error = 'Device is not enrolled. Please enroll this tablet in Settings to authorize image uploads.';
+    onProgress?.(currentItem);
+    return currentItem;
+  }
+
   const cleanBaseUrl = apiBaseUrl.replace(/\/+$/, '');
   const cleanProjectId = encodeURIComponent(project.id);
   const uploadUrlEndpoint = `${cleanBaseUrl}/api/v1/projects/${cleanProjectId}/images/upload-urls`;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'Authorization': `Bearer ${config.deviceToken}`,
+    'X-Device-Id': config.deviceId,
   };
-  if (config?.deviceToken) {
-    headers['Authorization'] = `Bearer ${config.deviceToken}`;
-    headers['X-Device-Id'] = config.deviceId;
-  }
 
   const targetMimeType = uploadFile.type || 'image/jpeg';
   let presignedInfo: PresignedUrlResponse;

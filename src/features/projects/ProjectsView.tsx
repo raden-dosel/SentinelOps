@@ -53,8 +53,15 @@ import {
   ImageOff,
   X,
   FileDown,
+  Smartphone,
 } from 'lucide-react';
-import { useConnectivity, OFFLINE_WARNING, API_UNREACHABLE_WARNING } from '../../hooks/useConnectivity';
+import {
+  useConnectivity,
+  OFFLINE_WARNING,
+  API_UNREACHABLE_WARNING,
+  ENROLLMENT_REQUIRED_WARNING,
+} from '../../hooks/useConnectivity';
+import { syncCoordinator } from '../../services/syncCoordinator';
 import {
   buildProjectImageName,
   getAttachmentDisplayName,
@@ -126,6 +133,44 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
   // R2 CORS Helper Modal
   const [isCorsModalOpen, setIsCorsModalOpen] = useState(false);
   const [copiedCors, setCopiedCors] = useState(false);
+
+  // Tablet Enrollment Modal
+  const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
+  const [enrollApiUrl, setEnrollApiUrl] = useState(
+    (import.meta as any)?.env?.VITE_API_BASE_URL ||
+      (typeof window !== 'undefined' ? window.location.origin : '') ||
+      'http://localhost:5000'
+  );
+  const [enrollDeviceName, setEnrollDeviceName] = useState('Operations Tablet');
+  const [enrollBusinessName, setEnrollBusinessName] = useState('Sentinel Security PH');
+  const [enrollRegToken, setEnrollRegToken] = useState('');
+  const [isEnrollingDevice, setIsEnrollingDevice] = useState(false);
+  const [enrollError, setEnrollError] = useState<string | null>(null);
+
+  const handleEnrollFromProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!enrollRegToken.trim()) {
+      setEnrollError('Registration token is required.');
+      return;
+    }
+    setIsEnrollingDevice(true);
+    setEnrollError(null);
+    try {
+      await syncCoordinator.enrollDevice({
+        apiBaseUrl: enrollApiUrl.trim(),
+        registrationToken: enrollRegToken.trim(),
+        businessName: enrollBusinessName.trim(),
+        deviceName: enrollDeviceName.trim(),
+      });
+      await connectivity.checkReachability();
+      setIsEnrollModalOpen(false);
+      showToast('Tablet enrolled successfully! Cloudflare R2 uploads enabled.', 'success');
+    } catch (err: unknown) {
+      setEnrollError(err instanceof Error ? err.message : 'Enrollment failed.');
+    } finally {
+      setIsEnrollingDevice(false);
+    }
+  };
 
   // Pending Upload Confirmation State
   const [isUploadConfirmOpen, setIsUploadConfirmOpen] = useState(false);
@@ -868,31 +913,43 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
 
                 <div className="flex items-center gap-2 flex-wrap">
                   {/* Remote Cloudflare R2 Upload Button */}
-                  <label
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition ${
-                      connectivity.status === 'ready' && !isBatchUploading
-                        ? 'cursor-pointer bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20'
-                        : 'cursor-not-allowed bg-slate-800 text-slate-500 border border-slate-700/60'
-                    }`}
-                    aria-disabled={connectivity.status !== 'ready' || isBatchUploading}
-                    title={
-                      connectivity.status !== 'ready'
-                        ? connectivity.errorMessage || 'Cloudflare R2 upload unavailable'
-                        : 'Upload photo(s) directly to Cloudflare R2'
-                    }
-                  >
-                    <CloudUpload className="w-3.5 h-3.5" />
-                    <span>{isBatchUploading ? 'Uploading...' : 'Upload to Cloudflare R2'}</span>
-                    <input
-                      ref={r2FileInputRef}
-                      type="file"
-                      multiple
-                      accept="image/jpeg,image/png,image/webp"
-                      onChange={handleR2FilesSelected}
-                      disabled={connectivity.status !== 'ready' || isBatchUploading}
-                      className="hidden"
-                    />
-                  </label>
+                  {connectivity.status === 'not-enrolled' ? (
+                    <button
+                      type="button"
+                      onClick={() => setIsEnrollModalOpen(true)}
+                      className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40"
+                      title="Device enrollment required to upload images. Tap to pair this tablet."
+                    >
+                      <Smartphone className="w-3.5 h-3.5 text-blue-400" />
+                      <span>Enroll Tablet to Upload</span>
+                    </button>
+                  ) : (
+                    <label
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition ${
+                        connectivity.status === 'ready' && !isBatchUploading
+                          ? 'cursor-pointer bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20'
+                          : 'cursor-not-allowed bg-slate-800 text-slate-500 border border-slate-700/60'
+                      }`}
+                      aria-disabled={connectivity.status !== 'ready' || isBatchUploading}
+                      title={
+                        connectivity.status !== 'ready'
+                          ? connectivity.errorMessage || 'Cloudflare R2 upload unavailable'
+                          : 'Upload photo(s) directly to Cloudflare R2'
+                      }
+                    >
+                      <CloudUpload className="w-3.5 h-3.5" />
+                      <span>{isBatchUploading ? 'Uploading...' : 'Upload to Cloudflare R2'}</span>
+                      <input
+                        ref={r2FileInputRef}
+                        type="file"
+                        multiple
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={handleR2FilesSelected}
+                        disabled={connectivity.status !== 'ready' || isBatchUploading}
+                        className="hidden"
+                      />
+                    </label>
+                  )}
 
                   {/* Local Photo / Document Upload Button (Preserved Offline & Online) */}
                   <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold shadow-sm transition">
@@ -940,6 +997,27 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                   <div className="flex-1 font-medium leading-relaxed">
                     {OFFLINE_WARNING}
                   </div>
+                </div>
+              )}
+
+              {connectivity.status === 'not-enrolled' && (
+                <div
+                  className="flex items-start gap-2.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/25 text-xs text-blue-200"
+                  role="alert"
+                  aria-live="polite"
+                >
+                  <Smartphone className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                  <div className="flex-1 font-medium leading-relaxed">
+                    {ENROLLMENT_REQUIRED_WARNING}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsEnrollModalOpen(true)}
+                    className="px-3 py-1 text-[11px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-lg shrink-0 transition flex items-center gap-1.5 shadow-sm"
+                  >
+                    <Smartphone className="w-3 h-3" />
+                    <span>Enroll Tablet</span>
+                  </button>
                 </div>
               )}
 
@@ -1652,6 +1730,89 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
               </button>
             </div>
           </div>
+        </Modal>
+      )}
+
+      {/* Tablet Enrollment Modal */}
+      {isEnrollModalOpen && (
+        <Modal
+          isOpen={isEnrollModalOpen}
+          onClose={() => setIsEnrollModalOpen(false)}
+          title="Enroll Tablet for Cloudflare R2 Uploads"
+          subtitle="Pair this tablet with your SentinelOps server to authorize image storage"
+          maxWidth="lg"
+        >
+          <form onSubmit={handleEnrollFromProject} className="space-y-4 text-xs">
+            {enrollError && (
+              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300">
+                {enrollError}
+              </div>
+            )}
+            <div>
+              <label className="block font-semibold text-slate-300 mb-1">Central API Base URL *</label>
+              <input
+                type="url"
+                required
+                value={enrollApiUrl}
+                onChange={(e) => setEnrollApiUrl(e.target.value)}
+                placeholder="https://..."
+                className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block font-semibold text-slate-300 mb-1">Business Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={enrollBusinessName}
+                  onChange={(e) => setEnrollBusinessName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-300 mb-1">Tablet Label *</label>
+                <input
+                  type="text"
+                  required
+                  value={enrollDeviceName}
+                  onChange={(e) => setEnrollDeviceName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-300 mb-1">Device Registration Token *</label>
+              <input
+                type="password"
+                required
+                value={enrollRegToken}
+                onChange={(e) => setEnrollRegToken(e.target.value)}
+                placeholder="Enter registration token issued by administrator"
+                className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">
+                Development / testing key: <code className="text-emerald-400 select-all">SentinelOps-DevPairing-SecretKey-2026!</code>
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsEnrollModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isEnrollingDevice}
+                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold flex items-center gap-2 shadow-sm"
+              >
+                {isEnrollingDevice && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{isEnrollingDevice ? 'Enrolling...' : 'Enroll Tablet'}</span>
+              </button>
+            </div>
+          </form>
         </Modal>
       )}
     </div>
