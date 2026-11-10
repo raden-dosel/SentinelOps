@@ -1,0 +1,4 @@
+# Configuration for Bun package manager
+[install]
+# Disables frozen lockfile enforcement in CI and build environments
+frozenLockfile = false
