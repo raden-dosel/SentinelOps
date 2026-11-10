@@ -54,12 +54,18 @@ import {
   X,
   FileDown,
   Smartphone,
+  ShieldAlert,
+  ShieldX,
 } from 'lucide-react';
 import {
   useConnectivity,
   OFFLINE_WARNING,
+  OFFLINE_MESSAGE,
   API_UNREACHABLE_WARNING,
   ENROLLMENT_REQUIRED_WARNING,
+  INVALID_AUTH_WARNING,
+  FORBIDDEN_WARNING,
+  READY_MESSAGE,
 } from '../../hooks/useConnectivity';
 import { syncCoordinator } from '../../services/syncCoordinator';
 import {
@@ -912,16 +918,26 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap">
-                  {/* Remote Cloudflare R2 Upload Button */}
+                  {/* Remote Cloudflare R2 Upload Button / CTA */}
                   {connectivity.status === 'not-enrolled' ? (
                     <button
                       type="button"
                       onClick={() => setIsEnrollModalOpen(true)}
                       className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40"
-                      title="Device enrollment required to upload images. Tap to pair this tablet."
+                      title="Device enrollment is required. Enroll this tablet with SentinelOps."
                     >
                       <Smartphone className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Enroll Tablet to Upload</span>
+                      <span>Enroll Tablet</span>
+                    </button>
+                  ) : connectivity.status === 'invalid-auth' ? (
+                    <button
+                      type="button"
+                      onClick={() => setIsEnrollModalOpen(true)}
+                      className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40"
+                      title="Device authorization is invalid or expired. Re-enroll this tablet."
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Re-enroll Tablet</span>
                     </button>
                   ) : (
                     <label
@@ -932,13 +948,15 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                       }`}
                       aria-disabled={connectivity.status !== 'ready' || isBatchUploading}
                       title={
-                        connectivity.status !== 'ready'
+                        isBatchUploading
+                          ? 'Upload in progress.'
+                          : connectivity.status !== 'ready'
                           ? connectivity.errorMessage || 'Cloudflare R2 upload unavailable'
                           : 'Upload photo(s) directly to Cloudflare R2'
                       }
                     >
                       <CloudUpload className="w-3.5 h-3.5" />
-                      <span>{isBatchUploading ? 'Uploading...' : 'Upload to Cloudflare R2'}</span>
+                      <span>{isBatchUploading ? 'Upload in progress.' : 'Upload to Cloudflare R2'}</span>
                       <input
                         ref={r2FileInputRef}
                         type="file"
@@ -995,7 +1013,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 >
                   <WifiOff className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                   <div className="flex-1 font-medium leading-relaxed">
-                    {OFFLINE_WARNING}
+                    {OFFLINE_MESSAGE}
                   </div>
                 </div>
               )}
@@ -1021,6 +1039,40 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 </div>
               )}
 
+              {connectivity.status === 'invalid-auth' && (
+                <div
+                  className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 text-xs text-amber-200"
+                  role="alert"
+                  aria-live="polite"
+                >
+                  <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="flex-1 font-medium leading-relaxed">
+                    {INVALID_AUTH_WARNING}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsEnrollModalOpen(true)}
+                    className="px-3 py-1 text-[11px] font-bold bg-amber-600 hover:bg-amber-500 text-white rounded-lg shrink-0 transition flex items-center gap-1.5 shadow-sm"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Re-enroll Tablet</span>
+                  </button>
+                </div>
+              )}
+
+              {connectivity.status === 'forbidden' && (
+                <div
+                  className="flex items-start gap-2.5 p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-xs text-rose-200"
+                  role="alert"
+                  aria-live="polite"
+                >
+                  <ShieldX className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="flex-1 font-medium leading-relaxed">
+                    {FORBIDDEN_WARNING}
+                  </div>
+                </div>
+              )}
+
               {connectivity.status === 'api-unreachable' && (
                 <div
                   className="flex items-start gap-2.5 p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-xs text-rose-200"
@@ -1042,11 +1094,11 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 </div>
               )}
 
-              {connectivity.status === 'ready' && (
+              {connectivity.status === 'ready' && !isBatchUploading && (
                 <div className="flex items-center justify-between p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-300">
                   <div className="flex items-center gap-2">
                     <Wifi className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="font-medium">SentinelOps API connected. Cloudflare R2 uploads enabled.</span>
+                    <span className="font-medium">{READY_MESSAGE}</span>
                   </div>
                   <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400">Ready</span>
                 </div>

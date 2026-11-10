@@ -22,6 +22,7 @@ import {
 } from '../features/projects/projectImageNaming';
 import { generateUUID } from './security';
 import { buildProjectDetailsSnapshot } from './portfolioExportService';
+import { diagnosticLogger } from './diagnosticLogger';
 
 export type R2UploadState =
   | 'selected'
@@ -266,20 +267,39 @@ export async function uploadSingleFileToR2(
   // 3. Request presigned PUT URL from SentinelOps API
   currentItem.state = 'requesting authorization';
   currentItem.progressPercent = 15;
+  // 3. Request presigned PUT URL from SentinelOps API
+  currentItem.state = 'requesting authorization';
+  currentItem.progressPercent = 15;
   onProgress?.(currentItem);
+
+  const correlationId = generateUUID();
 
   const config = await syncConfigRepository.getConfig();
   const apiBaseUrl = config?.apiBaseUrl || (import.meta as any)?.env?.VITE_API_BASE_URL || '';
   if (!apiBaseUrl) {
     currentItem.state = 'failed';
     currentItem.error = 'API base URL is not configured. Please enroll device in Settings.';
+    diagnosticLogger.logPresignedUrl({
+      stage: 'failed',
+      projectId: project.id,
+      fileCount: 1,
+      correlationId,
+      error: currentItem.error,
+    });
     onProgress?.(currentItem);
     return currentItem;
   }
 
   if (!config?.deviceId || !config?.deviceToken) {
     currentItem.state = 'failed';
-    currentItem.error = 'Device is not enrolled. Please enroll this tablet in Settings to authorize image uploads.';
+    currentItem.error = 'Device enrollment is required.';
+    diagnosticLogger.logPresignedUrl({
+      stage: 'failed',
+      projectId: project.id,
+      fileCount: 1,
+      correlationId,
+      error: 'Device is not enrolled',
+    });
     onProgress?.(currentItem);
     return currentItem;
   }
@@ -297,25 +317,46 @@ export async function uploadSingleFileToR2(
   const targetMimeType = uploadFile.type || 'image/jpeg';
   let presignedInfo: PresignedUrlResponse;
 
+  diagnosticLogger.logPresignedUrl({
+    stage: 'started',
+    projectId: project.id,
+    fileCount: 1,
+    correlationId,
+  });
+
   try {
-    const res = await fetch(uploadUrlEndpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        files: [
-          {
-            fileName: currentItem.file.name,
-            fileType: targetMimeType,
-            fileSize: uploadFile.size,
-            attachmentId: currentItem.id,
-            sequenceNumber: currentItem.sequenceNumber,
-            folderName: currentItem.folderName,
-          },
-        ],
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(uploadUrlEndpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          files: [
+            {
+              fileName: currentItem.file.name,
+              fileType: targetMimeType,
+              fileSize: uploadFile.size,
+              attachmentId: currentItem.id,
+              sequenceNumber: currentItem.sequenceNumber,
+              folderName: currentItem.folderName,
+            },
+          ],
+        }),
+      });
+    } catch {
+      throw new Error(
+        'SentinelOps server is unreachable. Image uploads are temporarily unavailable. Check your connection and try again.'
+      );
+    }
 
     if (!res.ok) {
+      if (res.status === 401) {
+        throw new Error('Device authorization is invalid or expired.');
+      }
+      if (res.status === 403) {
+        throw new Error('You do not have permission to upload images.');
+      }
+
       const errText = await res.text();
       let parsedMsg = '';
       try {
@@ -335,9 +376,23 @@ export async function uploadSingleFileToR2(
     currentItem.objectKey = presignedInfo.objectKey;
     currentItem.r2Bucket = presignedInfo.bucket;
     currentItem.presignedPutUrl = presignedInfo.uploadUrl;
+
+    diagnosticLogger.logPresignedUrl({
+      stage: 'succeeded',
+      projectId: project.id,
+      fileCount: 1,
+      correlationId,
+    });
   } catch (err: unknown) {
     currentItem.state = 'failed';
     currentItem.error = err instanceof Error ? err.message : 'Failed to obtain upload authorization.';
+    diagnosticLogger.logPresignedUrl({
+      stage: 'failed',
+      projectId: project.id,
+      fileCount: 1,
+      correlationId,
+      error: currentItem.error,
+    });
     onProgress?.(currentItem);
     return currentItem;
   }
@@ -347,11 +402,27 @@ export async function uploadSingleFileToR2(
   currentItem.progressPercent = 25;
   onProgress?.(currentItem);
 
+  diagnosticLogger.logR2Upload({
+    stage: 'started',
+    sequenceNumber: currentItem.sequenceNumber,
+    fileType: targetMimeType,
+    fileSize: uploadFile.size,
+    correlationId,
+  });
+
   try {
     await executeR2Put(presignedInfo.uploadUrl, uploadFile, targetMimeType, (pct) => {
       // Map 0-100% upload progress to 25-85% overall progress
       currentItem.progressPercent = Math.min(85, Math.max(25, Math.round(25 + pct * 0.6)));
       onProgress?.(currentItem);
+    });
+
+    diagnosticLogger.logR2Upload({
+      stage: 'succeeded',
+      sequenceNumber: currentItem.sequenceNumber,
+      fileType: targetMimeType,
+      fileSize: uploadFile.size,
+      correlationId,
     });
   } catch (err: unknown) {
     currentItem.state = 'failed';
@@ -359,6 +430,14 @@ export async function uploadSingleFileToR2(
       err instanceof Error
         ? err.message
         : 'Direct PUT upload to Cloudflare R2 failed or presigned URL expired.';
+    diagnosticLogger.logR2Upload({
+      stage: 'failed',
+      sequenceNumber: currentItem.sequenceNumber,
+      fileType: targetMimeType,
+      fileSize: uploadFile.size,
+      correlationId,
+      error: currentItem.error,
+    });
     onProgress?.(currentItem);
     return currentItem;
   }
@@ -392,6 +471,13 @@ export async function uploadSingleFileToR2(
   }
 
   // 6. Durably persist metadata in local IndexedDB + syncOutbox
+  diagnosticLogger.logMetadataPersistence({
+    stage: 'started',
+    attachmentId: presignedInfo.attachmentId || currentItem.id,
+    projectId: project.id,
+    correlationId,
+  });
+
   try {
     // Numbered filename: {Sequence}.{ext} (e.g. 1.jpg)
     const numberedName = buildNumberedImageFileName(
@@ -423,11 +509,26 @@ export async function uploadSingleFileToR2(
     currentItem.attachmentRecord = saved;
     currentItem.progressPercent = 100;
     currentItem.state = 'uploaded';
+
+    diagnosticLogger.logMetadataPersistence({
+      stage: 'succeeded',
+      attachmentId: attachmentRecord.id,
+      projectId: project.id,
+      correlationId,
+    });
+
     onProgress?.(currentItem);
     return currentItem;
   } catch (err: unknown) {
     currentItem.state = 'failed';
     currentItem.error = err instanceof Error ? err.message : 'Failed to save attachment metadata locally.';
+    diagnosticLogger.logMetadataPersistence({
+      stage: 'failed',
+      attachmentId: presignedInfo.attachmentId || currentItem.id,
+      projectId: project.id,
+      correlationId,
+      error: currentItem.error,
+    });
     onProgress?.(currentItem);
     return currentItem;
   }

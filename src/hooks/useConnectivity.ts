@@ -11,8 +11,16 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { syncConfigRepository } from '../storage/repositories';
+import { diagnosticLogger } from '../services/diagnosticLogger';
 
-export type ConnectivityStatus = 'checking' | 'offline' | 'api-unreachable' | 'not-enrolled' | 'ready';
+export type ConnectivityStatus =
+  | 'checking'
+  | 'offline'
+  | 'api-unreachable'
+  | 'not-enrolled'
+  | 'invalid-auth'
+  | 'forbidden'
+  | 'ready';
 
 export interface ConnectivityState {
   status: ConnectivityStatus;
@@ -28,12 +36,25 @@ export interface ConnectivityState {
 
 export const OFFLINE_WARNING =
   'No internet connection. Connect to the internet to upload project images.';
+export const OFFLINE_MESSAGE =
+  'No internet connection. Image uploads are unavailable offline.';
 
 export const API_UNREACHABLE_WARNING =
   'SentinelOps server is unreachable. Image uploads are temporarily unavailable. Check your connection and try again.';
+export const API_UNREACHABLE_MESSAGE =
+  'SentinelOps server is unreachable.';
 
 export const ENROLLMENT_REQUIRED_WARNING =
-  'Device enrollment required. Enroll this tablet with SentinelOps to authorize Cloudflare R2 image uploads.';
+  'Device enrollment is required.';
+
+export const INVALID_AUTH_WARNING =
+  'Device authorization is invalid or expired.';
+
+export const FORBIDDEN_WARNING =
+  'You do not have permission to upload images.';
+
+export const READY_MESSAGE =
+  'Ready to upload images.';
 
 const REACHABILITY_TIMEOUT_MS = 6000;
 
@@ -141,8 +162,69 @@ export function useConnectivity(): ConnectivityState {
           },
         });
         apiHealthy = response.ok;
-      } catch {
+        diagnosticLogger.logHealthCheck({
+          url: healthUrl,
+          success: response.ok,
+          status: response.status,
+        });
+      } catch (healthErr: unknown) {
         apiHealthy = false;
+        diagnosticLogger.logHealthCheck({
+          url: `${targetBaseUrl}/api/v1/health/live`,
+          success: false,
+          error: healthErr instanceof Error ? healthErr.message : 'Connection failed',
+        });
+      }
+
+      // If server is healthy and device is enrolled, probe device authorization
+      let isAuthValid = true;
+      let authStatus: ConnectivityStatus = 'ready';
+      let authErrorMessage: string | null = null;
+
+      if (enrolled && apiHealthy && config?.deviceToken && config?.deviceId) {
+        try {
+          const authProbeUrl = `${targetBaseUrl}/api/v1/projects/__probe__/images`;
+          const authRes = await fetch(authProbeUrl, {
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json',
+              'Authorization': `Bearer ${config.deviceToken}`,
+              'X-Device-Id': config.deviceId,
+              'X-SentinelOps-Reachability-Check': 'true',
+            },
+            signal: abortController.signal,
+          });
+
+          if (authRes.status === 401) {
+            isAuthValid = false;
+            authStatus = 'invalid-auth';
+            authErrorMessage = INVALID_AUTH_WARNING;
+            diagnosticLogger.logDeviceAuth({
+              deviceId: config.deviceId,
+              authorized: false,
+              httpStatus: 401,
+              error: 'Device token rejected or expired',
+            });
+          } else if (authRes.status === 403) {
+            isAuthValid = false;
+            authStatus = 'forbidden';
+            authErrorMessage = FORBIDDEN_WARNING;
+            diagnosticLogger.logDeviceAuth({
+              deviceId: config.deviceId,
+              authorized: false,
+              httpStatus: 403,
+              error: 'Device role is not authorized for image uploads',
+            });
+          } else {
+            diagnosticLogger.logDeviceAuth({
+              deviceId: config.deviceId,
+              authorized: true,
+              httpStatus: authRes.status,
+            });
+          }
+        } catch {
+          // Transient network probe timeout; rely on main health probe
+        }
       }
 
       clearTimeout(timeoutId);
@@ -153,21 +235,28 @@ export function useConnectivity(): ConnectivityState {
         if (!enrolled) {
           setStatus('not-enrolled');
           setErrorMessage(ENROLLMENT_REQUIRED_WARNING);
+          diagnosticLogger.logEnrollmentState(false);
           return 'not-enrolled';
         }
 
-        if (apiHealthy) {
-          setStatus('ready');
-          setErrorMessage(null);
-          return 'ready';
-        } else {
+        if (!apiHealthy) {
           setStatus('api-unreachable');
           setErrorMessage(API_UNREACHABLE_WARNING);
           return 'api-unreachable';
         }
+
+        if (!isAuthValid) {
+          setStatus(authStatus);
+          setErrorMessage(authErrorMessage);
+          return authStatus;
+        }
+
+        setStatus('ready');
+        setErrorMessage(null);
+        return 'ready';
       }
 
-      return !enrolled ? 'not-enrolled' : apiHealthy ? 'ready' : 'api-unreachable';
+      return !enrolled ? 'not-enrolled' : !apiHealthy ? 'api-unreachable' : !isAuthValid ? authStatus : 'ready';
     } catch (err: unknown) {
       clearTimeout(timeoutId);
       if (abortController.signal.aborted && !isMountedRef.current) {

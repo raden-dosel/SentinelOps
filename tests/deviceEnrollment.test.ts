@@ -23,9 +23,7 @@ describe('SentinelOps Device Enrollment & Multi-Tablet Authorization Suite', () 
 
       const status = !isEnrolled ? 'not-enrolled' : 'ready';
       expect(status).toBe('not-enrolled');
-      expect(ENROLLMENT_REQUIRED_WARNING).toBe(
-        'Device enrollment required. Enroll this tablet with SentinelOps to authorize Cloudflare R2 image uploads.'
-      );
+      expect(ENROLLMENT_REQUIRED_WARNING).toBe('Device enrollment is required.');
     });
 
     it('DEV-002: Complete approved enrollment persists valid deviceId and deviceToken', async () => {
