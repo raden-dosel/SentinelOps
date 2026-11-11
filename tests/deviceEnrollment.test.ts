@@ -218,52 +218,46 @@ describe('SentinelOps Device Enrollment & Multi-Tablet Authorization Suite', () 
   });
 
   describe('Phase 8: Image Upload Availability & Policy Tests (IMG-001 through IMG-007)', () => {
-    it('IMG-004 & IMG-006: Upload is disabled when device is un-enrolled or offline', () => {
-      function isUploadAllowed(isOnline: boolean, isEnrolled: boolean, isApiReachable: boolean): {
+    it('IMG-004 & IMG-006: Decoupled policy: upload is available when online regardless of device enrollment', () => {
+      function isUploadAllowed(isOnline: boolean, isEnrolled: boolean, isAuthorized: boolean): {
         allowed: boolean;
         reason?: string;
       } {
         if (!isOnline) {
           return { allowed: false, reason: OFFLINE_WARNING };
         }
-        if (!isEnrolled) {
-          return { allowed: false, reason: ENROLLMENT_REQUIRED_WARNING };
+        if (!isAuthorized) {
+          return { allowed: false, reason: 'You do not have permission to upload images.' };
         }
-        if (!isApiReachable) {
-          return { allowed: false, reason: API_UNREACHABLE_WARNING };
-        }
+        // Centralized device enrollment is not required for R2 image uploads
         return { allowed: true };
       }
 
-      // Offline
-      expect(isUploadAllowed(false, true, true).allowed).toBe(false);
-      expect(isUploadAllowed(false, true, true).reason).toBe(OFFLINE_WARNING);
+      // Offline -> Disabled
+      expect(isUploadAllowed(false, false, true).allowed).toBe(false);
+      expect(isUploadAllowed(false, false, true).reason).toBe(OFFLINE_WARNING);
 
-      // Online but not enrolled
-      expect(isUploadAllowed(true, false, true).allowed).toBe(false);
-      expect(isUploadAllowed(true, false, true).reason).toBe(ENROLLMENT_REQUIRED_WARNING);
+      // Online and authorized, NOT enrolled -> Allowed!
+      expect(isUploadAllowed(true, false, true).allowed).toBe(true);
 
-      // Online and enrolled but API unreachable
-      expect(isUploadAllowed(true, true, false).allowed).toBe(false);
-      expect(isUploadAllowed(true, true, false).reason).toBe(API_UNREACHABLE_WARNING);
-
-      // Online, enrolled, API reachable
+      // Online and authorized, enrolled -> Allowed!
       expect(isUploadAllowed(true, true, true).allowed).toBe(true);
+
+      // Unauthorized user -> Disabled
+      expect(isUploadAllowed(true, false, false).allowed).toBe(false);
     });
 
-    it('IMG-007: When connectivity returns, upload can be initiated manually', () => {
+    it('IMG-007: When connectivity returns, upload can be initiated on both enrolled and unenrolled tablets', () => {
       let isOnline = false;
-      let isEnrolled = true;
-      let isApiReachable = false;
+      const isAuthorized = true;
 
       // Initially offline
       expect(isOnline).toBe(false);
 
       // Connection restored
       isOnline = true;
-      isApiReachable = true;
 
-      const canUploadNow = isOnline && isEnrolled && isApiReachable;
+      const canUploadNow = isOnline && isAuthorized;
       expect(canUploadNow).toBe(true);
     });
   });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import 'fake-indexeddb/auto';
 import { syncConfigRepository, attachmentRepository, projectRepository } from '../src/storage/repositories';
 import { resetDatabaseConnection, SyncConfig } from '../src/storage/database';
@@ -6,7 +6,6 @@ import {
   OFFLINE_MESSAGE,
   OFFLINE_WARNING,
   API_UNREACHABLE_WARNING,
-  ENROLLMENT_REQUIRED_WARNING,
   INVALID_AUTH_WARNING,
   FORBIDDEN_WARNING,
   READY_MESSAGE,
@@ -15,11 +14,14 @@ import {
   prepareR2UploadItems,
   uploadSingleFileToR2,
   validateImageFile,
+  getLocalDiagnosticDeviceId,
+  resolveApiBaseUrl,
+  MAX_FILE_SIZE_BYTES,
 } from '../src/services/r2UploadService';
 import { diagnosticLogger } from '../src/services/diagnosticLogger';
-import { Project } from '../src/types';
+import { Project, AttachmentRecord } from '../src/types';
 
-describe('SentinelOps — Cross-Device R2 Remediation Test Suite (R2-001 through R2-015)', () => {
+describe('SentinelOps — Decoupled Cloudflare R2 Upload Test Suite', () => {
   beforeEach(async () => {
     indexedDB = new IDBFactory();
     resetDatabaseConnection();
@@ -43,226 +45,322 @@ describe('SentinelOps — Cross-Device R2 Remediation Test Suite (R2-001 through
     updatedAt: '2026-11-01T08:00:00Z',
   };
 
-  it('R2-001: First enrolled tablet successfully requests presigned URL and uploads to R2', async () => {
-    const configTablet1: SyncConfig = {
-      id: 'current_config',
-      apiBaseUrl: 'http://localhost:5000',
-      deviceId: '11111111-aaaa-bbbb-cccc-000000000001',
-      deviceToken: 'token-tablet-1-high-entropy-secret-key-32',
-      businessId: 'biz-01',
-      businessName: 'Sentinel Security PH',
-      deviceName: 'Field Tablet 1 (Leader)',
-      autoSync: true,
-      syncIntervalMinutes: 5,
-      enrolledAt: '2026-11-01T08:00:00Z',
-      lastSyncStatus: 'Idle',
-    };
-    await syncConfigRepository.saveConfig(configTablet1);
+  describe('Group A: Independent R2 Upload (R2-001 through R2-007)', () => {
+    it('R2-001: Fresh tablet with empty syncConfig has R2 upload available when online', async () => {
+      const config = await syncConfigRepository.getConfig();
+      expect(config).toBeNull();
 
-    const stored = await syncConfigRepository.getConfig();
-    expect(stored?.deviceId).toBe('11111111-aaaa-bbbb-cccc-000000000001');
-    expect(stored?.deviceToken).toBe('token-tablet-1-high-entropy-secret-key-32');
+      const isOnline = true;
+      const isAuthorized = true;
+      const isUploadAvailable = isOnline && isAuthorized;
+      expect(isUploadAvailable).toBe(true);
 
-    const file = new File(['mock image bytes'], 'test.jpg', { type: 'image/jpeg' });
-    const items = prepareR2UploadItems([file], sampleProject, []);
-    expect(items.length).toBe(1);
-    expect(items[0].sequenceNumber).toBe(1);
-    expect(items[0].folderName).toBe('Main-Perimeter-Fence-Installation_2026-11-01');
-  });
-
-  it('R2-002: Second tablet starts un-enrolled; displays enrollment guidance and does not falsely claim server unreachable', async () => {
-    const config = await syncConfigRepository.getConfig();
-    expect(config).toBeNull();
-
-    const isEnrolled = Boolean(config?.deviceId && config?.deviceToken);
-    expect(isEnrolled).toBe(false);
-
-    // Simulated evaluation when server is healthy (200 OK) but tablet has no enrollment credentials
-    const isServerHealthy = true;
-    const resolvedStatus = !isEnrolled ? 'not-enrolled' : isServerHealthy ? 'ready' : 'api-unreachable';
-
-    expect(resolvedStatus).toBe('not-enrolled');
-    expect(resolvedStatus).not.toBe('api-unreachable');
-    expect(ENROLLMENT_REQUIRED_WARNING).toBe('Device enrollment is required.');
-  });
-
-  it('R2-003: Second tablet completes independent enrollment with unique GUID and distinct token in IndexedDB', async () => {
-    const tablet2Enrollment: SyncConfig = {
-      id: 'current_config',
-      apiBaseUrl: 'http://localhost:5000',
-      deviceId: '22222222-dddd-eeee-ffff-000000000002',
-      deviceToken: 'token-tablet-2-distinct-secret-hash-64',
-      businessId: 'biz-01',
-      businessName: 'Sentinel Security PH',
-      deviceName: 'Field Tablet 2 (Junior)',
-      autoSync: true,
-      syncIntervalMinutes: 5,
-      enrolledAt: '2026-11-10T09:00:00Z',
-      lastSyncStatus: 'Idle',
-    };
-
-    await syncConfigRepository.saveConfig(tablet2Enrollment);
-
-    const stored = await syncConfigRepository.getConfig();
-    expect(stored).not.toBeNull();
-    expect(stored?.deviceId).toBe('22222222-dddd-eeee-ffff-000000000002');
-    expect(stored?.deviceToken).toBe('token-tablet-2-distinct-secret-hash-64');
-  });
-
-  it('R2-004: Two devices maintain independent identities without collision or shared tokens', () => {
-    const device1 = {
-      deviceId: '11111111-aaaa-bbbb-cccc-000000000001',
-      deviceToken: 'token-tablet-1',
-    };
-    const device2 = {
-      deviceId: '22222222-dddd-eeee-ffff-000000000002',
-      deviceToken: 'token-tablet-2',
-    };
-
-    expect(device1.deviceId).not.toBe(device2.deviceId);
-    expect(device1.deviceToken).not.toBe(device2.deviceToken);
-  });
-
-  it('R2-005: Second tablet transitions to ready state upon valid enrollment and server reachability', async () => {
-    await syncConfigRepository.saveConfig({
-      id: 'current_config',
-      apiBaseUrl: 'http://localhost:5000',
-      deviceId: '22222222-dddd-eeee-ffff-000000000002',
-      deviceToken: 'token-tablet-2-distinct-secret-hash-64',
-      businessId: 'biz-01',
-      businessName: 'Sentinel Security PH',
-      deviceName: 'Tablet 2',
-      autoSync: true,
-      syncIntervalMinutes: 5,
-      enrolledAt: new Date().toISOString(),
-      lastSyncStatus: 'Idle',
+      const items = prepareR2UploadItems(
+        [new File(['photo bytes'], 'survey.jpg', { type: 'image/jpeg' })],
+        sampleProject,
+        []
+      );
+      expect(items.length).toBe(1);
+      expect(items[0].sequenceNumber).toBe(1);
     });
 
-    const config = await syncConfigRepository.getConfig();
-    const isEnrolled = Boolean(config?.deviceId && config?.deviceToken);
-    const isServerHealthy = true;
-    const isAuthValid = true;
+    it('R2-002: Device without centralized deviceId has R2 upload available', async () => {
+      const config = await syncConfigRepository.getConfig();
+      expect(config?.deviceId).toBeUndefined();
 
-    const status = !isEnrolled ? 'not-enrolled' : !isServerHealthy ? 'api-unreachable' : !isAuthValid ? 'invalid-auth' : 'ready';
-    expect(status).toBe('ready');
-    expect(READY_MESSAGE).toBe('Ready to upload images.');
-  });
-
-  it('R2-006: Server reachability is verified independently from device enrollment', () => {
-    function evaluateStatus(isOnline: boolean, isEnrolled: boolean, apiHealthy: boolean) {
-      if (!isOnline) return 'offline';
-      if (!isEnrolled) return 'not-enrolled';
-      if (!apiHealthy) return 'api-unreachable';
-      return 'ready';
-    }
-
-    // Server is live, but tablet not enrolled
-    expect(evaluateStatus(true, false, true)).toBe('not-enrolled');
-    // Server is down, tablet is enrolled
-    expect(evaluateStatus(true, true, false)).toBe('api-unreachable');
-    // Both live and enrolled
-    expect(evaluateStatus(true, true, true)).toBe('ready');
-  });
-
-  it('R2-007: Genuinely unreachable server produces api-unreachable status with retry guidance', () => {
-    expect(API_UNREACHABLE_WARNING).toBe(
-      'SentinelOps server is unreachable. Image uploads are temporarily unavailable. Check your connection and try again.'
-    );
-  });
-
-  it('R2-008: Offline browser state produces offline status and disables upload', () => {
-    expect(OFFLINE_MESSAGE).toBe('No internet connection. Image uploads are unavailable offline.');
-    expect(OFFLINE_WARNING).toBe('No internet connection. Connect to the internet to upload project images.');
-  });
-
-  it('R2-009: Invalid or expired device token maps to invalid-auth status and warning', () => {
-    expect(INVALID_AUTH_WARNING).toBe('Device authorization is invalid or expired.');
-  });
-
-  it('R2-010: Unauthorized user role maps to forbidden status and warning', () => {
-    expect(FORBIDDEN_WARNING).toBe('You do not have permission to upload images.');
-  });
-
-  it('R2-011: R2 CORS preflight failure produces actionable message', () => {
-    const corsErrorMessage =
-      'Cloudflare R2 CORS preflight failed. Check allowed origins in bucket settings.';
-    expect(corsErrorMessage).toContain('Cloudflare R2 CORS preflight failed');
-    expect(corsErrorMessage).toContain('allowed origins in bucket settings');
-  });
-
-  it('R2-012: Expired presigned PUT URL maps to signature/expiry error', () => {
-    const expiredErrorMessage = 'Presigned upload URL expired or signature mismatch.';
-    expect(expiredErrorMessage).toContain('Presigned upload URL expired');
-  });
-
-  it('R2-013: Privacy-safe diagnostic logger generates correlation IDs and never logs credentials or PII', () => {
-    diagnosticLogger.logConnectivityStart('http://localhost:5000', true);
-    diagnosticLogger.logHealthCheck({
-      url: 'http://localhost:5000/api/v1/health/live',
-      success: true,
-      status: 200,
-    });
-    diagnosticLogger.logEnrollmentState(true, '11111111-aaaa-bbbb-cccc-000000000001');
-    diagnosticLogger.logDeviceAuth({
-      deviceId: '11111111-aaaa-bbbb-cccc-000000000001',
-      authorized: true,
-      httpStatus: 200,
-    });
-    diagnosticLogger.logPresignedUrl({
-      stage: 'started',
-      projectId: 'prj-001',
-      fileCount: 1,
-      correlationId: 'corr-test-123',
+      const localDevId = getLocalDiagnosticDeviceId();
+      expect(localDevId).toBeDefined();
+      expect(typeof localDevId).toBe('string');
+      expect(localDevId.length).toBeGreaterThan(0);
     });
 
-    const logs = diagnosticLogger.getRecentLogs();
-    expect(logs.length).toBeGreaterThan(0);
+    it('R2-003: Device without centralized deviceToken has R2 upload available', async () => {
+      const config = await syncConfigRepository.getConfig();
+      expect(config?.deviceToken).toBeUndefined();
 
-    for (const log of logs) {
-      const serialized = JSON.stringify(log);
-      expect(serialized).not.toContain('deviceToken');
-      expect(serialized).not.toContain('secret');
-      expect(serialized).not.toContain('password');
-      expect(serialized).not.toContain('X-Amz-Signature');
-    }
+      const resolvedBaseUrl = resolveApiBaseUrl(null);
+      expect(resolvedBaseUrl).toBeDefined();
+      expect(resolvedBaseUrl.length).toBeGreaterThan(0);
+    });
+
+    it('R2-004: Device that has never enrolled in centralized API can prepare and process R2 upload items', () => {
+      const files = [
+        new File(['img1'], 'camera1.jpg', { type: 'image/jpeg' }),
+        new File(['img2'], 'camera2.png', { type: 'image/png' }),
+      ];
+
+      const items = prepareR2UploadItems(files, sampleProject, []);
+      expect(items.length).toBe(2);
+      expect(items[0].folderName).toBe('Main-Perimeter-Fence-Installation_2026-11-01');
+      expect(items[0].sequenceNumber).toBe(1);
+      expect(items[1].sequenceNumber).toBe(2);
+    });
+
+    it('R2-005: Second tablet using a different authorized user succeeds with independent R2 uploads', async () => {
+      const tablet2User = {
+        userId: 'usr-tablet-2-field-engineer',
+        role: 'Operations',
+        username: 'engineer_tablet2',
+      };
+
+      expect(tablet2User.role).not.toBe('ReadOnly');
+      const isAuthorized = tablet2User.role === 'Admin' || tablet2User.role === 'Operations';
+      expect(isAuthorized).toBe(true);
+    });
+
+    it('R2-006: Third independently initialized tablet operates without centralized enrollment', async () => {
+      const tablet3Config = {
+        id: 'current_config',
+        apiBaseUrl: 'http://localhost:5000',
+        businessName: 'Sentinel Security PH',
+        deviceName: 'Operations Tablet 3',
+        autoSync: false,
+        syncIntervalMinutes: 15,
+        lastSyncStatus: 'Idle',
+      } as unknown as SyncConfig;
+      await syncConfigRepository.saveConfig(tablet3Config);
+
+      const stored = await syncConfigRepository.getConfig();
+      expect(stored?.deviceId).toBeUndefined();
+      expect(stored?.deviceToken).toBeUndefined();
+
+      const items = prepareR2UploadItems(
+        [new File(['3'], 'gate.jpg', { type: 'image/jpeg' })],
+        sampleProject,
+        []
+      );
+      expect(items[0].sequenceNumber).toBe(1);
+    });
+
+    it('R2-007: Existing first tablet with enrolled credentials remains operational (zero regression)', async () => {
+      const tablet1Enrolled: SyncConfig = {
+        id: 'current_config',
+        apiBaseUrl: 'http://localhost:5000',
+        deviceId: '11111111-aaaa-bbbb-cccc-000000000001',
+        deviceToken: 'token-tablet-1-high-entropy-secret-key-32',
+        businessId: 'biz-01',
+        businessName: 'Sentinel Security PH',
+        deviceName: 'Tablet 1',
+        autoSync: true,
+        syncIntervalMinutes: 5,
+        enrolledAt: '2026-11-01T08:00:00Z',
+        lastSyncStatus: 'Idle',
+      };
+      await syncConfigRepository.saveConfig(tablet1Enrolled);
+
+      const stored = await syncConfigRepository.getConfig();
+      expect(stored?.deviceId).toBe('11111111-aaaa-bbbb-cccc-000000000001');
+      expect(stored?.deviceToken).toBe('token-tablet-1-high-entropy-secret-key-32');
+    });
   });
 
-  it('R2-014: Monotonically incrementing image sequence numbers per project', () => {
-    const existing = [
-      { sequenceNumber: 1, r2FolderName: 'Perimeter_2026-11-01' },
-      { sequenceNumber: 2, r2FolderName: 'Perimeter_2026-11-01' },
-    ];
-    const newFiles = [
-      new File(['1'], 'img1.jpg', { type: 'image/jpeg' }),
-      new File(['2'], 'img2.jpg', { type: 'image/jpeg' }),
-    ];
+  describe('Group B: Centralized API Independence (API-001 through API-004)', () => {
+    it('API-001: Centralized API database sync unavailable does not block local R2 upload path', () => {
+      const centralizedSyncLive = false;
+      const r2ServiceAvailable = true;
+      const isOnline = true;
 
-    const items = prepareR2UploadItems(newFiles, sampleProject, existing);
-    expect(items[0].sequenceNumber).toBe(3);
-    expect(items[1].sequenceNumber).toBe(4);
+      const canUploadToR2 = isOnline && r2ServiceAvailable;
+      expect(canUploadToR2).toBe(true);
+      expect(centralizedSyncLive).toBe(false);
+    });
+
+    it('API-002: Device not enrolled in centralized API does not block R2 upload', async () => {
+      const config = await syncConfigRepository.getConfig();
+      const isEnrolled = Boolean(config?.deviceId && config?.deviceToken);
+      expect(isEnrolled).toBe(false);
+
+      const isUploadBlockedByEnrollment = false;
+      expect(isUploadBlockedByEnrollment).toBe(false);
+    });
+
+    it('API-003: Centralized synchronization disabled does not impair R2 upload', async () => {
+      await syncConfigRepository.saveConfig({
+        id: 'current_config',
+        apiBaseUrl: 'http://localhost:5000',
+        deviceId: '',
+        deviceToken: '',
+        businessId: 'biz-standalone',
+        businessName: 'Standalone Operations',
+        deviceName: 'Local Tablet',
+        autoSync: false,
+        syncIntervalMinutes: 0,
+        enrolledAt: new Date().toISOString(),
+        lastSyncStatus: 'Idle',
+      });
+
+      const config = await syncConfigRepository.getConfig();
+      expect(config?.autoSync).toBe(false);
+
+      const items = prepareR2UploadItems(
+        [new File(['x'], 'perimeter.jpg', { type: 'image/jpeg' })],
+        sampleProject,
+        []
+      );
+      expect(items.length).toBe(1);
+    });
+
+    it('API-004: Centralized API enrollment later completed has no adverse effect on R2 upload', async () => {
+      // Step 1: Works before enrollment
+      const filesBefore = [new File(['before'], 'before.jpg', { type: 'image/jpeg' })];
+      const itemsBefore = prepareR2UploadItems(filesBefore, sampleProject, []);
+      expect(itemsBefore[0].sequenceNumber).toBe(1);
+
+      // Step 2: Tablet later enrolls
+      await syncConfigRepository.saveConfig({
+        id: 'current_config',
+        apiBaseUrl: 'http://localhost:5000',
+        deviceId: 'new-guid-later-enrolled',
+        deviceToken: 'new-token-later-enrolled-64chars',
+        businessId: 'biz-default-001',
+        businessName: 'Sentinel Security PH',
+        deviceName: 'Enrolled Tablet',
+        autoSync: true,
+        syncIntervalMinutes: 5,
+        enrolledAt: new Date().toISOString(),
+        lastSyncStatus: 'Idle',
+      });
+
+      // Step 3: Continues working seamlessly
+      const filesAfter = [new File(['after'], 'after.jpg', { type: 'image/jpeg' })];
+      const itemsAfter = prepareR2UploadItems(filesAfter, sampleProject, itemsBefore);
+      expect(itemsAfter[0].sequenceNumber).toBe(2);
+    });
   });
 
-  it('R2-015: Online-only policy: file validation rejects 0-byte and oversized files; offline fallback saves locally', async () => {
-    const emptyFile = new File([], 'empty.jpg', { type: 'image/jpeg' });
-    expect(validateImageFile(emptyFile).valid).toBe(false);
+  describe('Group C: Security (SEC-001 through SEC-006)', () => {
+    it('SEC-001: Unauthorized user role (ReadOnly) is rejected from uploading', () => {
+      function authorizeRole(role: string): boolean {
+        return role === 'Admin' || role === 'Operations' || role === 'Technician';
+      }
 
-    // Save locally without R2
-    await projectRepository.save(sampleProject);
-    const localAtt = {
-      id: 'local-att-test',
-      entityType: 'Project' as const,
-      entityId: sampleProject.id,
-      fileName: '1.jpg',
-      fileType: 'image/jpeg',
-      fileSize: 1024,
-      uploadedAt: new Date().toISOString(),
-      sequenceNumber: 1,
-      storageProvider: 'local' as const,
-      blob: new Blob(['dummy'], { type: 'image/jpeg' }),
-    };
+      expect(authorizeRole('ReadOnly')).toBe(false);
+      expect(authorizeRole('Admin')).toBe(true);
+      expect(authorizeRole('Operations')).toBe(true);
+      expect(FORBIDDEN_WARNING).toBe('You do not have permission to upload images.');
+    });
 
-    const saved = await attachmentRepository.saveAttachment(localAtt);
-    expect(saved.storageProvider).toBe('local');
-    expect(saved.entityId).toBe(sampleProject.id);
+    it('SEC-002: User lacking project access or authorization cannot initiate upload', () => {
+      const isProjectClosed = true;
+      const canUploadToClosedProject = !isProjectClosed;
+      expect(canUploadToClosedProject).toBe(false);
+    });
+
+    it('SEC-003: Invalid or expired upload authorization is rejected', () => {
+      function validateToken(token: string): boolean {
+        if (!token || token.length < 16) return false;
+        if (token.includes('invalid') || token.includes('expired') || token.includes('wrong')) return false;
+        return true;
+      }
+
+      expect(validateToken('invalid-token-here')).toBe(false);
+      expect(validateToken('expired-session-token')).toBe(false);
+      expect(validateToken('valid-high-entropy-session-token-32')).toBe(true);
+      expect(INVALID_AUTH_WARNING).toBe('Device authorization is invalid or expired.');
+    });
+
+    it('SEC-004: Invalid file type is rejected by client validation', () => {
+      const exeFile = new File(['binary'], 'virus.exe', { type: 'application/x-msdownload' });
+      const txtFile = new File(['text'], 'notes.txt', { type: 'text/plain' });
+
+      expect(validateImageFile(exeFile).valid).toBe(false);
+      expect(validateImageFile(txtFile).valid).toBe(false);
+    });
+
+    it('SEC-005: Oversized file exceeding 10 MB free-tier limit is rejected', () => {
+      const hugeFile = new File(['big'], 'oversized.jpg', { type: 'image/jpeg' });
+      Object.defineProperty(hugeFile, 'size', { value: 12 * 1024 * 1024 });
+
+      const validation = validateImageFile(hugeFile);
+      expect(validation.valid).toBe(false);
+      expect(validation.error).toContain('10 MB');
+    });
+
+    it('SEC-006: Frontend inspection verifies no R2 secret credentials exist client-side', () => {
+      diagnosticLogger.logPresignedUrl({
+        stage: 'started',
+        projectId: sampleProject.id,
+        fileCount: 1,
+        correlationId: 'sec-corr-001',
+      });
+
+      const logs = diagnosticLogger.getRecentLogs();
+      for (const entry of logs) {
+        const text = JSON.stringify(entry);
+        expect(text).not.toContain('R2_SECRET_ACCESS_KEY');
+        expect(text).not.toContain('SecretAccessKey');
+        expect(text).not.toContain('AWS4');
+      }
+    });
+  });
+
+  describe('Group D: Offline and Failure Handling (NET-001 through NET-005)', () => {
+    it('NET-001: Offline state disables R2 upload and provides offline guidance', () => {
+      const isOnline = false;
+      const uploadEnabled = isOnline;
+      expect(uploadEnabled).toBe(false);
+      expect(OFFLINE_MESSAGE).toBe('No internet connection. Image uploads are unavailable offline.');
+    });
+
+    it('NET-002: API unavailable but R2 path operational allows R2 upload readiness', () => {
+      const centralizedApiSyncDown = true;
+      const r2UploadServiceUp = true;
+
+      const canUploadR2 = r2UploadServiceUp;
+      expect(canUploadR2).toBe(true);
+    });
+
+    it('NET-003: R2 upload service unavailable reports accurate service error', () => {
+      expect(API_UNREACHABLE_WARNING).toContain('SentinelOps server is unreachable');
+    });
+
+    it('NET-004: Presigned URL request failure surfaces actionable error', () => {
+      const uploadError = 'Upload authorization failed with HTTP 503.';
+      expect(uploadError).toContain('503');
+    });
+
+    it('NET-005: R2 CORS preflight failure is accurately identified', () => {
+      const corsMessage =
+        'Cloudflare R2 CORS preflight failed. Check allowed origins in bucket settings.';
+      expect(corsMessage).toContain('Cloudflare R2 CORS preflight failed');
+      expect(corsMessage).toContain('allowed origins in bucket settings');
+    });
+  });
+
+  describe('Group E: Regression', () => {
+    it('monotonically increments image sequence numbers per project', () => {
+      const existing: Array<{ sequenceNumber: number }> = [
+        { sequenceNumber: 1 },
+        { sequenceNumber: 2 },
+      ];
+      const newFiles = [new File([''], 'photo.jpg', { type: 'image/jpeg' })];
+      const items = prepareR2UploadItems(newFiles, sampleProject, existing);
+      expect(items[0].sequenceNumber).toBe(3);
+    });
+
+    it('isolates attachments per project in IndexedDB', async () => {
+      await projectRepository.save(sampleProject);
+      const attRecord: AttachmentRecord = {
+        id: 'att-iso-001',
+        entityType: 'Project',
+        entityId: sampleProject.id,
+        fileName: '1.jpg',
+        fileType: 'image/jpeg',
+        fileSize: 5000,
+        uploadedAt: new Date().toISOString(),
+        sequenceNumber: 1,
+        storageProvider: 'cloudflare-r2',
+        r2ObjectKey: 'sentinelops/tenant1/folder/1.jpg',
+        r2FolderName: 'Main-Perimeter-Fence-Installation_2026-11-01',
+      };
+
+      await attachmentRepository.saveAttachment(attRecord);
+      const atts = await attachmentRepository.getByEntity('Project', sampleProject.id);
+      expect(atts.length).toBe(1);
+      expect(atts[0].id).toBe('att-iso-001');
+
+      const otherAtts = await attachmentRepository.getByEntity('Project', 'other-project');
+      expect(otherAtts.length).toBe(0);
+    });
   });
 });

@@ -918,56 +918,34 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap">
-                  {/* Remote Cloudflare R2 Upload Button / CTA */}
-                  {connectivity.status === 'not-enrolled' ? (
-                    <button
-                      type="button"
-                      onClick={() => setIsEnrollModalOpen(true)}
-                      className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/40"
-                      title="Device enrollment is required. Enroll this tablet with SentinelOps."
-                    >
-                      <Smartphone className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Enroll Tablet</span>
-                    </button>
-                  ) : connectivity.status === 'invalid-auth' ? (
-                    <button
-                      type="button"
-                      onClick={() => setIsEnrollModalOpen(true)}
-                      className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40"
-                      title="Device authorization is invalid or expired. Re-enroll this tablet."
-                    >
-                      <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Re-enroll Tablet</span>
-                    </button>
-                  ) : (
-                    <label
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition ${
-                        connectivity.status === 'ready' && !isBatchUploading
-                          ? 'cursor-pointer bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20'
-                          : 'cursor-not-allowed bg-slate-800 text-slate-500 border border-slate-700/60'
-                      }`}
-                      aria-disabled={connectivity.status !== 'ready' || isBatchUploading}
-                      title={
-                        isBatchUploading
-                          ? 'Upload in progress.'
-                          : connectivity.status !== 'ready'
-                          ? connectivity.errorMessage || 'Cloudflare R2 upload unavailable'
-                          : 'Upload photo(s) directly to Cloudflare R2'
-                      }
-                    >
-                      <CloudUpload className="w-3.5 h-3.5" />
-                      <span>{isBatchUploading ? 'Upload in progress.' : 'Upload to Cloudflare R2'}</span>
-                      <input
-                        ref={r2FileInputRef}
-                        type="file"
-                        multiple
-                        accept="image/jpeg,image/png,image/webp"
-                        onChange={handleR2FilesSelected}
-                        disabled={connectivity.status !== 'ready' || isBatchUploading}
-                        className="hidden"
-                      />
-                    </label>
-                  )}
+                  {/* Remote Cloudflare R2 Upload Button */}
+                  <label
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition ${
+                      connectivity.status === 'ready' && !isBatchUploading
+                        ? 'cursor-pointer bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20'
+                        : 'cursor-not-allowed bg-slate-800 text-slate-500 border border-slate-700/60'
+                    }`}
+                    aria-disabled={connectivity.status !== 'ready' || isBatchUploading}
+                    title={
+                      isBatchUploading
+                        ? 'Upload in progress.'
+                        : connectivity.status !== 'ready'
+                        ? connectivity.errorMessage || 'Cloudflare R2 upload unavailable'
+                        : 'Upload photo(s) directly to Cloudflare R2'
+                    }
+                  >
+                    <CloudUpload className="w-3.5 h-3.5" />
+                    <span>{isBatchUploading ? 'Upload in progress.' : 'Upload to Cloudflare R2'}</span>
+                    <input
+                      ref={r2FileInputRef}
+                      type="file"
+                      multiple
+                      accept="image/jpeg,image/png,image/webp"
+                      onChange={handleR2FilesSelected}
+                      disabled={connectivity.status !== 'ready' || isBatchUploading}
+                      className="hidden"
+                    />
+                  </label>
 
                   {/* Local Photo / Document Upload Button (Preserved Offline & Online) */}
                   <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-bold shadow-sm transition">
@@ -1015,27 +993,6 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({
                   <div className="flex-1 font-medium leading-relaxed">
                     {OFFLINE_MESSAGE}
                   </div>
-                </div>
-              )}
-
-              {connectivity.status === 'not-enrolled' && (
-                <div
-                  className="flex items-start gap-2.5 p-3 rounded-xl bg-blue-500/10 border border-blue-500/25 text-xs text-blue-200"
-                  role="alert"
-                  aria-live="polite"
-                >
-                  <Smartphone className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
-                  <div className="flex-1 font-medium leading-relaxed">
-                    {ENROLLMENT_REQUIRED_WARNING}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setIsEnrollModalOpen(true)}
-                    className="px-3 py-1 text-[11px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-lg shrink-0 transition flex items-center gap-1.5 shadow-sm"
-                  >
-                    <Smartphone className="w-3 h-3" />
-                    <span>Enroll Tablet</span>
-                  </button>
                 </div>
               )}
 
